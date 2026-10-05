@@ -1,0 +1,24 @@
+{
+  "name": "consciousness",
+  "version": "1.0.0",
+  "description": "Sandbox for Vision, an autonomous robot mind with drives, emotion, memory, senses and an optional LLM cortex.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p client",
+    "typecheck": "tsc -p client --noEmit && tsc -p server --noEmit",
+    "start": "npm run build && tsx server/index.ts",
+    "dev": "npm run build && tsx watch server/index.ts",
+    "sim": "npm run build && node scripts/sim.mjs",
+    "test:steer": "npm run build && node scripts/steer-test.mjs",
+    "test": "npm run build && node scripts/vision-test.mjs && node scripts/dialogue-test.mjs && node scripts/brain-test.mjs && node scripts/limbic-test.mjs && node scripts/mind-test.mjs && node scripts/steer-test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

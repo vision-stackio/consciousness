@@ -1,0 +1,530 @@
+/**
+ * Sandbox entry point: wires the 3D body, the senses, the voice, the brain and the UI.
+ * Everything Vision does goes through executeInstructions(), the single motor gate.
+ */
+import { Brain, ARENA } from "./brain.js";
+import { Senses } from "./senses.js";
+import { askCortex, fetchHealth } from "./cortexClient.js";
+import { Steering, resolveOverlap } from "./steering.js";
+import { SightTracker, worldDetections, arenaLabel } from "./vision.js";
+import { Limbic } from "./limbic.js";
+import { BrainRenderer } from "./brainview.js";
+import { BrainPanel } from "./brainpanel.js";
+import { buildCloud, buildFibres } from "./brainsim/geometry.js";
+const banner = document.getElementById("protoBanner");
+if (location.protocol === "file:") {
+    banner.classList.add("show");
+    throw new Error("Serve the page with `npm start`.");
+}
+if (!window.THREE) {
+    document.getElementById("modelLoading").textContent = "Couldn't load three.js from cdnjs.cloudflare.com.";
+    throw new Error("THREE missing");
+}
+const { Rig } = await import("./rig.js");
+const { createSpeechController } = await import("./speech.js");
+const $ = (id) => document.getElementById(id);
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+// If his eyes look the wrong way for you, set GAZE_FLIP to true.
+const GAZE_FLIP = false;
+const eyeDir = () => (GAZE_FLIP ? -1 : 1);
+let stopped = false; // true while E-STOP is engaged
+let lastUserSpeechAt = -1e9; // he looks at you for a few seconds after you speak
+// How his voice sounds depends on his mood (rate, pitch).
+const VOICE = {
+    excited: [1.12, 1.2], curious: [1.05, 1.12], attentive: [1.0, 1.08], content: [1.0, 1.05], calm: [0.96, 1.0],
+    bored: [0.9, 0.95], lonely: [0.92, 0.98], startled: [1.2, 1.25],
+    happy: [1.06, 1.15], afraid: [1.18, 1.22], angry: [1.08, 0.85], sad: [0.86, 0.88], disgusted: [0.95, 0.9], hurt: [0.92, 1.1], sleepy: [0.8, 0.85],
+};
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+// ---------------------------------------------------------------- world ----
+const world = []; // what Vision knows about (toys, landmarks)
+const obstacles = []; // everything solid (he walks around these, known or not)
+const steering = new Steering();
+let unit = 1;
+let wandering = false, wanderHeading = 0, navActive = 0;
+const bodyR = () => unit * 0.7; // robot body radius for collision purposes
+const steerOpts = (ignore) => ({ body: bodyR(), lookahead: 7 * unit, margin: 0.5 * unit, ignore });
+/**
+ * Add a 3D model to the sandbox.
+ *  solid: Vision walks around it.   known: Vision (and the AI) can see it and walk to it.
+ * size is in robot-sizes. Example (inside placeProps):
+ *   await addScenery({ id: "tree1", url: "/assets/models/tree.glb", x: 20 * unit, z: -8 * unit, size: 4, known: true });
+ */
+async function addScenery(o) {
+    const { radius } = await Rig.addModel(o);
+    if (o.solid !== false)
+        obstacles.push({ id: o.id, x: o.x, z: o.z, r: radius * 0.8 });
+    if (o.known)
+        world.push({ id: o.id, kind: "landmark", x: o.x, z: o.z, color: "#ffffff", r: radius * 0.8 });
+}
+window.vision = { addScenery, world, obstacles }; // handy from the browser console
+function placeProps() {
+    unit = Rig.getPosition().unit;
+    Rig.addProp({ id: "arena", kind: "ring", x: 0, z: 0, color: 0xa78bfa, radius: ARENA * unit });
+    const add = (o) => { world.push(o); Rig.addProp({ id: o.id, kind: o.kind, x: o.x, z: o.z, color: parseInt(o.color.slice(1), 16), radius: unit }); obstacles.push({ id: o.id, x: o.x, z: o.z, r: unit * 0.35 }); };
+    add({ id: "toy_red", kind: "toy", x: 14 * unit, z: 2 * unit, color: "#ef4444" });
+    add({ id: "toy_blue", kind: "toy", x: -10 * unit, z: 18 * unit, color: "#38bdf8" });
+    add({ id: "toy_green", kind: "toy", x: -16 * unit, z: -12 * unit, color: "#84cc16" });
+}
+// ------------------------------------------------------------- UI helpers --
+let captionTimer;
+function showCaption(role, text) {
+    const el = $("caption");
+    clearTimeout(captionTimer);
+    el.className = `caption show ${role}`;
+    el.replaceChildren();
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = role === "user" ? "You" : "Vision";
+    el.append(who, document.createTextNode(text)); // textContent only: LLM output is never injected as HTML
+    captionTimer = window.setTimeout(() => el.classList.remove("show"), role === "user" ? 2800 : 6000);
+}
+function addLog(type, text) {
+    const log = $("log");
+    const row = document.createElement("div");
+    row.className = type;
+    const t = document.createElement("time");
+    t.textContent = new Date().toLocaleTimeString([], { hour12: false });
+    row.append(t, document.createTextNode(text));
+    log.prepend(row);
+    while (log.childElementCount > 1 && (log.scrollHeight > log.clientHeight + 1 || log.childElementCount > 150))
+        log.lastElementChild.remove(); // no scrollbar: the oldest entries fall off
+}
+// ---------------------------------------------------------- motor / voice --
+let eyeLock = 0; // >0 while a scripted action is moving his eyes, so gaze tracking stays out of the way
+let motionToken = 0; // bumping this cancels every in-flight GOTO / sequence loop
+let busyCount = 0;
+let voiceOn = true;
+let speaking = false;
+const speech = createSpeechController({
+    onInterim: () => { brain.notice(); lastUserSpeechAt = performance.now(); },
+    onFinal: (text) => { if (!speaking)
+        handleUserText(text); },
+    onListeningChange: (on) => { $("micBtn").classList.toggle("live", on); },
+});
+function speak(text) {
+    if (!text || !voiceOn)
+        return;
+    speaking = true;
+    senses.muted = true;
+    const [rate, pitch] = VOICE[brain.mood()] ?? [1.02, 1.05];
+    speech.speak(text, { rate, pitch, onEnd: () => setTimeout(() => { speaking = false; senses.muted = false; }, 450) });
+}
+const angleDiff = (a, b) => (((a - b) % 360) + 540) % 360 - 180;
+async function goTo(x, z, stop, token) {
+    const t0 = performance.now();
+    Rig.setDancing(false);
+    wandering = false;
+    navActive++;
+    steering.forget();
+    eyeLock++; // eyes lead the body while travelling
+    const goal = obstacles.find((o) => Math.hypot(o.x - x, o.z - z) < unit)?.id; // never avoid the thing we're walking to
+    try {
+        while (token === motionToken && performance.now() - t0 < 25000) {
+            const p = Rig.getPosition();
+            const dx = x - p.x, dz = z - p.z;
+            if (Math.hypot(dx, dz) <= stop)
+                break;
+            const desired = (Math.atan2(dx, dz) * 180) / Math.PI;
+            const heading = steering.heading(p, desired, obstacles, steerOpts(goal)); // sidestep anything in the way
+            Rig.setBodyTurn(heading);
+            const rel = angleDiff(heading, Rig.getTurnDeg());
+            Rig.setEyeAngle(clamp(90 + eyeDir() * rel * 0.7, 35, 145)); // look where he is going before the body gets there
+            Rig.setWalking(Math.abs(rel) < 28, 1); // turn first, then walk
+            await delay(60);
+        }
+    }
+    finally {
+        navActive--;
+        eyeLock--;
+        Rig.setWalking(false);
+        Rig.setEyeAngle(90);
+    }
+}
+async function executeInstructions(instructions) {
+    if (!instructions.length)
+        return;
+    const token = motionToken;
+    const usesEyes = instructions.some((i) => i.op === "EXEC" && i.command.startsWith("EYE_"));
+    if (usesEyes)
+        eyeLock++;
+    busyCount++;
+    $("bodyState").textContent = "Acting…";
+    try {
+        for (const i of instructions) {
+            if (token !== motionToken)
+                break;
+            if (i.op === "SLEEP") {
+                await delay(i.ms);
+                continue;
+            }
+            const arg = i.arg;
+            switch (i.command) {
+                case "EYE_CENTER":
+                    Rig.setEyeAngle(90);
+                    break;
+                case "EYE_SET":
+                    Rig.setEyeAngle(clamp(Number(arg), 0, 180));
+                    break;
+                case "EYE_LEFT":
+                    Rig.setEyeAngle(clamp(Rig.getEyeAngle() - Number(arg ?? 15), 0, 180));
+                    break;
+                case "EYE_RIGHT":
+                    Rig.setEyeAngle(clamp(Rig.getEyeAngle() + Number(arg ?? 15), 0, 180));
+                    break;
+                case "TURN_LEFT":
+                    Rig.setBodyTurn(Rig.getBodyTurn() - 90);
+                    await delay(Number(arg ?? 600));
+                    break;
+                case "TURN_RIGHT":
+                    Rig.setBodyTurn(Rig.getBodyTurn() + 90);
+                    await delay(Number(arg ?? 600));
+                    break;
+                case "FACE":
+                    Rig.setBodyTurn(Number(arg));
+                    break;
+                case "WALK_FORWARD":
+                    Rig.setDancing(false);
+                    wandering = true;
+                    wanderHeading = Rig.getBodyTurn();
+                    steering.forget();
+                    Rig.setWalking(true, 1);
+                    $("bodyState").textContent = "Walking";
+                    break;
+                case "WALK_STOP":
+                    wandering = false;
+                    Rig.setWalking(false);
+                    Rig.setDancing(false);
+                    $("bodyState").textContent = "Idle";
+                    break;
+                case "DANCE":
+                    Rig.setWalking(false);
+                    Rig.setDancing(true);
+                    $("bodyState").textContent = "Dancing";
+                    break;
+                case "GOTO": {
+                    const [x, z, stop] = String(arg).split(",").map(Number);
+                    if ([x, z, stop].every(Number.isFinite)) {
+                        $("bodyState").textContent = "Going somewhere";
+                        await goTo(x, z, stop, token);
+                    }
+                    break;
+                }
+                default: break;
+            }
+        }
+    }
+    finally {
+        if (usesEyes)
+            eyeLock--;
+        busyCount--;
+        if (busyCount === 0 && !Rig.isWalking())
+            $("bodyState").textContent = $("bodyState").textContent === "Dancing" ? "Dancing" : "Idle";
+    }
+}
+// -------------------------------------------------------------- the brain --
+const senses = new Senses($("cam"));
+let shareFrames = false;
+// ---- the emotional brain: a rotating 3D brain with hormones, driven by what happens to him ----
+const limbic = new Limbic();
+const density = Math.max(0.3, Math.min(1.5, Number(new URLSearchParams(location.search).get("density")) || 0.8)); // ?density=0.5 on a slow machine
+const cloud = buildCloud(limbic.sim.nodes, density);
+const fibres = buildFibres(cloud, limbic.sim.nodes, Math.round(340 * Math.min(1, density)));
+const brainRenderer = new BrainRenderer(limbic.sim, cloud, fibres, { left: $("brainCanvas") });
+const brainPanel = new BrainPanel(limbic, brainRenderer);
+let limbicScale = 1; // follows the "time speed" control
+let lastFrame = performance.now(), panelTimer = 0;
+function brainFrame(now) {
+    const dt = Math.min(0.1, (now - lastFrame) / 1000);
+    lastFrame = now;
+    for (let left = dt * limbicScale, i = 0; left > 1e-6 && i < 8; i++) {
+        const h = Math.min(0.25, left);
+        limbic.step(h);
+        left -= h;
+    }
+    brainRenderer.draw(dt, limbic.sim.time);
+    panelTimer += dt;
+    if (panelTimer > 0.12) {
+        panelTimer = 0;
+        brainPanel.update();
+    }
+    requestAnimationFrame(brainFrame);
+}
+requestAnimationFrame(brainFrame);
+window.limbic = limbic; // poke it from the console: limbic.feel("praise")
+const brain = new Brain({
+    act: (instructions, say) => {
+        if (say) {
+            showCaption("assistant", say);
+            speak(say);
+        }
+        return executeInstructions(instructions);
+    },
+    isBusy: () => busyCount > 0,
+    getPose: () => ({ ...Rig.getPosition(), headingDeg: Rig.getTurnDeg() }),
+    getWorld: () => world,
+}, {
+    onUpdate: renderMind,
+    onEvent: addLog,
+    onFeel: (kind, detail) => limbic.feel(kind, detail),
+    getChem: () => limbic.state(),
+    getSenses: () => {
+        // what he sees = the camera + the arena objects in front of him
+        const r = senses.read();
+        const arena = arenaSights.slice(0, 5).map((s) => ({ label: s.label, side: (s.cx < 0.38 ? "left" : s.cx > 0.62 ? "right" : "center"), near: s.size > 0.12, source: "arena" }));
+        return { ...r, seen: [...(r.seen ?? []), ...arena] };
+    },
+    think: async (req) => askCortex(req, shareFrames && senses.cameraOn ? senses.snapshot() : null),
+});
+function renderMind(m) {
+    $("mindMood").textContent = m.mood;
+    $("mindLast").textContent = m.lastAction;
+    $("mindThought").textContent = m.thought;
+    const set = (k, v, text) => {
+        const b = document.querySelector(`#bars [data-k="${k}"]`);
+        if (b)
+            b.style.width = Math.round(v * 100) + "%";
+        const t = document.querySelector(`#bars [data-v="${k}"]`);
+        if (t)
+            t.textContent = text;
+    };
+    for (const k of ["curiosity", "social", "boredom", "arousal"])
+        set(k, m[k], String(Math.round(m[k] * 100)));
+    set("valence", (m.valence + 1) / 2, (m.valence >= 0 ? "+" : "") + m.valence.toFixed(2));
+    const facts = [m.userName ? `knows you as ${m.userName}` : "doesn't know your name yet", `${m.interactions} conversations`, m.favorite ? `favorite: ${m.favorite.replace("_", " ")}` : ""];
+    $("facts").textContent = facts.filter(Boolean).join(" · ");
+}
+function handleUserText(text) {
+    lastUserSpeechAt = performance.now();
+    showCaption("user", text);
+    const local = brain.hear(text);
+    if (!local)
+        return; // AI mode: the cortex will answer
+    const stopNow = local.instructions.some((i) => i.op === "EXEC" && i.command === "WALK_STOP") && /stop/i.test(local.reply);
+    const pause = stopNow ? 0 : 350 + Math.random() * 450; // a short beat before answering feels natural (but never delay a stop)
+    if (stopNow)
+        void executeInstructions(local.instructions);
+    setTimeout(() => {
+        showCaption("assistant", local.reply);
+        speak(local.reply);
+        if (!stopNow)
+            void executeInstructions(local.instructions);
+    }, pause);
+}
+// ----------------------------------------------------------------- safety --
+function estop() {
+    stopped = true;
+    motionToken++;
+    Rig.setStopped(true);
+    Rig.setWalking(false);
+    Rig.setDancing(false);
+    window.speechSynthesis?.cancel();
+    brain.setMode("off");
+    setModeUI("off");
+    $("bodyState").textContent = "E-STOP";
+    $("estop").classList.add("armed");
+    $("estop").textContent = "RESUME";
+    addLog("system", "EMERGENCY STOP: all motion halted, mind switched off");
+}
+function resume() { stopped = false; Rig.setStopped(false); $("estop").classList.remove("armed"); $("estop").textContent = "E-STOP"; $("bodyState").textContent = "Idle"; addLog("system", "resumed"); }
+$("estop").addEventListener("click", () => ($("estop").classList.contains("armed") ? resume() : estop()));
+window.addEventListener("keydown", (e) => { if (e.key === "Escape")
+    estop(); });
+// Reflexes, 20 Hz, never waiting for any decision maker: arena wall, obstacle steering, no-clipping.
+setInterval(() => {
+    const p = Rig.getPosition();
+    if (Rig.isWalking() && Math.hypot(p.x, p.z) > ARENA * p.unit) {
+        motionToken++;
+        wandering = false;
+        Rig.setWalking(false);
+        Rig.setBodyTurn((Math.atan2(-p.x, -p.z) * 180) / Math.PI);
+        brain.note("I bumped into the arena wall and stopped");
+    }
+    if (wandering && navActive === 0 && Rig.isWalking()) { // free walking: steer around whatever is ahead
+        const h = steering.heading(p, wanderHeading, obstacles, steerOpts());
+        Rig.setBodyTurn(h);
+    }
+    const fix = resolveOverlap(p, obstacles, bodyR()); // last line of defense: never stand inside an object
+    if (fix) {
+        Rig.setPosition(fix.x, fix.z);
+        if (wandering)
+            brain.note("I bumped into something and stepped around it");
+    }
+}, 50);
+// ---------------------------------------------------------------- controls -
+function setModeUI(m) { document.querySelectorAll("#modeSeg button").forEach((b) => b.classList.toggle("on", b.dataset.mode === m)); }
+document.querySelectorAll("#modeSeg button").forEach((b) => b.addEventListener("click", () => {
+    if ($("estop").classList.contains("armed"))
+        resume();
+    brain.setMode(b.dataset.mode);
+    setModeUI(b.dataset.mode);
+}));
+async function toggleDevice(box, note, on, off) {
+    try {
+        if (box.checked) {
+            await on();
+            $(note).textContent = "on";
+        }
+        else {
+            off();
+            $(note).textContent = "off";
+        }
+    }
+    catch (e) {
+        box.checked = false;
+        $(note).textContent = "blocked";
+        addLog("system", `permission failed: ${e.message}`);
+    }
+}
+$("tglCam").addEventListener("change", async (e) => {
+    const box = e.target;
+    if (box.checked)
+        $("pip").classList.add("show"); // a display:none video may never decode frames, so show it first
+    await toggleDevice(box, "camNote", () => senses.enableCamera(), () => senses.disableCamera());
+    $("pip").classList.toggle("show", senses.cameraOn);
+});
+$("tglMic").addEventListener("change", (e) => {
+    const box = e.target;
+    void toggleDevice(box, "micNote", async () => { await senses.enableMic(); speech.startListening(); }, () => { senses.disableMic(); speech.stopListening(); });
+});
+$("tglVoice").addEventListener("change", (e) => { voiceOn = e.target.checked; if (!voiceOn)
+    window.speechSynthesis?.cancel(); });
+$("tglShare").addEventListener("change", (e) => {
+    shareFrames = e.target.checked;
+    addLog("system", shareFrames ? "camera frames will be sent to the AI provider on each thought" : "frames stay on this device (the AI still gets text labels of what I see)");
+});
+document.querySelectorAll("#speedSeg button").forEach((b) => b.addEventListener("click", () => {
+    const n = Number(b.dataset.speed);
+    brain.setTimeScale(n);
+    limbicScale = n;
+    document.querySelectorAll("#speedSeg button").forEach((x) => x.classList.toggle("on", x === b));
+}));
+$("micBtn").addEventListener("click", () => (speech.isListening() ? speech.stopListening() : speech.startListening()));
+$("talkForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = $("talkText");
+    const text = input.value.trim();
+    if (text) {
+        input.value = "";
+        handleUserText(text);
+    }
+});
+senses.onEvent = (k) => brain.stimulus(k);
+senses.onSight = (ev) => brain.sight(ev);
+// The arena is part of what he sees: objects inside his field of view (about 130 degrees, 24 body-sizes) show up as sights.
+const worldTracker = new SightTracker(2, 2500);
+let arenaSights = [];
+setInterval(() => {
+    if (brain.mode === "off" || stopped || !world.length)
+        return;
+    const p = Rig.getPosition();
+    const dets = worldDetections({ x: p.x, z: p.z, headingDeg: Rig.getTurnDeg(), unit: p.unit }, world.map((o) => ({ id: o.id, label: arenaLabel(o.id), x: o.x, z: o.z, r: o.r ?? unit * 0.35 })));
+    for (const ev of worldTracker.update(dets, performance.now()))
+        brain.sight({ ...ev, source: "arena" });
+    arenaSights = worldTracker.current();
+}, 250);
+senses.onStatus = (t) => { $("pipStatus").textContent = t; addLog("system", `vision: ${t}`); };
+// What he sees, drawn over the preview (boxes) and summarised in the Mind panel.
+const overlay = $("pipOverlay");
+setInterval(() => {
+    const ctx = overlay.getContext("2d");
+    if (!ctx)
+        return;
+    const video = $("cam");
+    overlay.width = overlay.clientWidth || 240;
+    overlay.height = overlay.clientHeight || 180;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const arenaNames = arenaSights.map((s) => `${s.label} (${s.cx < 0.38 ? "left" : s.cx > 0.62 ? "right" : "center"})`);
+    if (!senses.cameraOn) {
+        $("seeing").textContent = arenaNames.length ? `In the arena I see: ${arenaNames.join(", ")} · camera off` : "camera off · nothing in front of me";
+        return;
+    }
+    $("pipMotion").style.width = Math.round(senses.motion * 100) + "%";
+    ctx.lineWidth = 2;
+    ctx.font = "11px monospace";
+    for (const s of senses.sights) {
+        const x = (s.cx - s.w / 2) * overlay.width, y = (s.cy - s.h / 2) * overlay.height, w = s.w * overlay.width, h = s.h * overlay.height;
+        const color = s.label === "person" || s.label === "someone" ? "#22c55e" : "#38bdf8";
+        ctx.strokeStyle = color;
+        ctx.strokeRect(x, y, w, h);
+        ctx.fillStyle = color;
+        ctx.fillText(s.label, x + 3, Math.max(11, y - 3));
+    }
+    const names = senses.sights.map((s) => `${s.color && s.label !== "person" ? s.color + " " : ""}${s.label} (${s.cx < 0.38 ? "left" : s.cx > 0.62 ? "right" : "center"})`);
+    const tier = senses.mode === "model" ? "naming objects" : senses.mode === "loading" ? "loading object model…" : "pixel mode: can see movement, can't name things";
+    const cam = names.length ? `Camera: ${names.join(", ")}` : (video.videoWidth ? `camera: nothing yet · ${tier}` : "waiting for camera frames…");
+    $("seeing").textContent = arenaNames.length ? `${cam} · Arena: ${arenaNames.join(", ")}` : cam;
+}, 200);
+// Gaze: alive eyes. He looks at whoever is talking, follows a person (or the biggest thing, or recent movement)
+// seen by the camera, and otherwise glances around the way a curious creature does (small, irregular, mood-dependent).
+let gazeAngle = 90, gazeGoal = 90, nextSaccade = 0;
+const glanceAtToy = () => {
+    const p = Rig.getPosition(), toys = world.filter((o) => o.kind === "toy");
+    if (!toys.length)
+        return null;
+    const o = toys[Math.floor(Math.random() * toys.length)];
+    const rel = angleDiff((Math.atan2(o.x - p.x, o.z - p.z) * 180) / Math.PI, Rig.getTurnDeg());
+    return clamp(90 + eyeDir() * clamp(rel, -50, 50) * 0.8, 35, 145);
+};
+setInterval(() => {
+    if (brain.mode === "off" || stopped || eyeLock > 0)
+        return;
+    const now = performance.now();
+    const target = senses.cameraOn ? senses.gazeTarget() : null;
+    if (now - lastUserSpeechAt < 3000)
+        gazeGoal = 90; // eye contact with whoever is talking
+    else if (target)
+        gazeGoal = 90 + eyeDir() * (target.cx - 0.5) * 2 * 55; // follow what the camera sees
+    else if (now > nextSaccade) { // idle glances
+        const m = brain.mood();
+        const spread = Rig.isWalking() ? 8 : m === "curious" || m === "bored" ? 38 : m === "attentive" ? 14 : 22;
+        gazeGoal = Math.random() < 0.18 ? glanceAtToy() ?? 90 : 90 + (Math.random() * 2 - 1) * spread;
+        nextSaccade = now + 1200 + Math.random() * 3200;
+    }
+    gazeAngle += (gazeGoal - gazeAngle) * 0.3;
+    Rig.setEyeAngle(clamp(gazeAngle, 0, 180));
+}, 70);
+document.querySelectorAll("[data-stim]").forEach((b) => b.addEventListener("click", () => {
+    const k = b.dataset.stim;
+    if (k === "teleport") {
+        const a = Math.random() * 6.28;
+        Rig.setPosition(Math.sin(a) * 34 * unit, Math.cos(a) * 34 * unit);
+        brain.stimulus("teleport");
+    }
+    else if (k === "skip") {
+        brain.fastForward(60);
+        for (let i = 0; i < 240; i++)
+            limbic.step(0.25);
+    }
+    else if (k === "reset") {
+        try {
+            localStorage.removeItem("vision.mind.v3");
+        }
+        catch { /* ignore */ }
+        location.reload();
+    }
+    else if (k === "gift") {
+        const id = `toy_${Math.random().toString(36).slice(2, 5)}`;
+        const p = Rig.getPosition();
+        const a = Math.random() * 6.28;
+        const o = { id, kind: "toy", x: p.x + Math.sin(a) * 8 * unit, z: p.z + Math.cos(a) * 8 * unit, color: "#f59e0b" };
+        world.push(o);
+        obstacles.push({ id, x: o.x, z: o.z, r: unit * 0.35 });
+        Rig.addProp({ id, kind: "toy", x: o.x, z: o.z, color: 0xf59e0b, radius: unit });
+        brain.stimulus("gift");
+    }
+    else
+        brain.stimulus(k);
+}));
+// -------------------------------------------------------------------- boot --
+fetchHealth().then((h) => {
+    const b = $("llmBadge"), t = b.querySelector("span");
+    if (!h) {
+        t.textContent = "server unreachable";
+        b.classList.add("warn");
+        return;
+    }
+    t.textContent = h.llm.configured ? `LLM: ${h.llm.provider} · ${h.llm.model}` : "AI mind: no API key, falls back to local";
+    b.classList.add(h.llm.configured ? "good" : "warn");
+});
+Rig.ready.then(() => { placeProps(); brain.start(); }).catch(() => addLog("system", "3D model failed to load"));

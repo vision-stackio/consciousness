@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vision · Consciousness Sandbox</title>
+<link rel="icon" type="image/png" href="./assets/logo/Vision.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+<div class="proto-banner" id="protoBanner"><div><strong>Serve this page, don't open the file.</strong><div>Run <code>npm start</code> and open <code>http://localhost:8787</code>.</div></div></div>
+
+<header class="top">
+  <div class="brand"><img src="./assets/logo/Vision.png" alt="" /><div><b>Vision</b><span>consciousness sandbox</span></div></div>
+  <div class="seg" id="modeSeg" role="group" aria-label="Mind mode">
+    <button data-mode="off">Off</button>
+    <button data-mode="local" class="on">Local mind</button>
+    <button data-mode="ai">AI mind</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="badge" id="llmBadge"><i></i><span>LLM: checking…</span></div>
+  <button class="estop" id="estop" title="Emergency stop (Esc)">E-STOP</button>
+</header>
+
+<div class="layout">
+  <!-- LEFT: the brain and the mind -->
+  <aside class="col">
+    <section class="card brain" id="brSec">
+      <div class="card-h"><h3>Brain</h3><span class="chip" id="brState">awake</span><button type="button" class="link-btn" id="brainExpand" title="Enlarge the brain and hormones">Enlarge</button></div>
+      <div class="brain-body">
+        <div class="brain-view"><canvas id="brainCanvas"></canvas></div>
+        <div class="brain-read">
+          <div class="emo-row"><i class="emo-dot"></i><span id="brEmo">neutral</span><em id="brInt">0%</em></div>
+          <i class="meter"><b id="brMeter"></b></i>
+          <p id="brWhy">at rest, waiting for something to happen</p>
+        </div>
+        <div class="brain-side">
+          <div class="chem-title">Hormones &amp; neuromodulators</div>
+          <div class="chem-grid" id="chemGrid"></div>
+          <div class="brain-instinct" id="brInstinct">instinct <b>observe</b></div>
+          <ul class="brain-legend" id="brainLegend"></ul>
+          <p class="brain-note">A functional model, not a biological one. Drag the brain to turn it. <kbd>L</kbd> labels · <kbd>E</kbd> pathways · <kbd>Esc</kbd> closes.</p>
+        </div>
+      </div>
+    </section>
+    <section class="card mind">
+      <div class="card-h"><h3>Mind</h3><span class="chip ghost" id="mindLast"></span></div>
+      <div class="mind-mood" id="mindMood">calm</div>
+      <p class="mind-thought" id="mindThought"></p>
+      <p class="seeing" id="seeing">camera off</p>
+      <div class="bars" id="bars">
+        <label><span>curiosity</span><i><b data-k="curiosity"></b></i><em data-v="curiosity">0</em></label>
+        <label><span>social need</span><i><b data-k="social"></b></i><em data-v="social">0</em></label>
+        <label><span>boredom</span><i><b data-k="boredom"></b></i><em data-v="boredom">0</em></label>
+        <label><span>valence</span><i><b data-k="valence"></b></i><em data-v="valence">0</em></label>
+        <label><span>arousal</span><i><b data-k="arousal"></b></i><em data-v="arousal">0</em></label>
+      </div>
+      <p class="facts" id="facts"></p>
+    </section>
+  </aside>
+
+  <!-- CENTER: the arena -->
+  <section class="stage-panel">
+    <div id="stage3d"></div>
+    <div class="model-loading" id="modelLoading">Loading 3D model…</div>
+    <div class="body-state" id="bodyState">Idle</div>
+    <div class="caption" id="caption"></div>
+    <div class="pip" id="pip"><div class="pip-view"><video id="cam" playsinline muted></video><canvas id="pipOverlay"></canvas></div><div class="pip-bar"><span id="pipMotion"></span></div><div class="pip-status" id="pipStatus">camera off</div></div>
+    <form class="dock" id="talkForm">
+      <button type="button" class="mic-btn" id="micBtn" title="Talk (speech recognition)"><span id="micIcon">🎙</span></button>
+      <input id="talkText" type="text" placeholder="Say something to Vision…" autocomplete="off" />
+      <button type="submit" class="send">Send</button>
+    </form>
+  </section>
+
+  <!-- RIGHT: capabilities, stimuli, log -->
+  <aside class="col">
+    <section class="card">
+      <div class="card-h"><h3>Capabilities</h3></div>
+      <div class="tgl-grid">
+        <label class="tgl"><input type="checkbox" id="tglCam" /><span>Camera</span><em id="camNote">off</em></label>
+        <label class="tgl"><input type="checkbox" id="tglMic" /><span>Microphone</span><em id="micNote">off</em></label>
+        <label class="tgl"><input type="checkbox" id="tglVoice" checked /><span>Voice</span><em>speaks aloud</em></label>
+        <label class="tgl"><input type="checkbox" id="tglShare" /><span>Share frames</span><em>with the AI</em></label>
+      </div>
+      <div class="speed-row"><span>Time speed</span>
+        <div class="seg mini" id="speedSeg" role="group" aria-label="Time speed"><button data-speed="1" class="on">1×</button><button data-speed="5">5×</button><button data-speed="20">20×</button></div></div>
+    </section>
+    <section class="card">
+      <div class="card-h"><h3>Stimuli</h3></div>
+      <div class="stim">
+        <button data-stim="praise">Praise</button><button data-stim="scold">Scold</button>
+        <button data-stim="poke">Poke</button><button data-stim="ignored">Ignore him</button>
+        <button data-stim="loud_noise">Loud noise</button><button data-stim="gift">Drop a toy</button>
+        <button data-stim="teleport">Teleport far</button><button data-stim="skip">Skip 60 s</button>
+        <button data-stim="reset" class="danger wide">Reset memory</button>
+      </div>
+    </section>
+    <section class="card grow">
+      <div class="card-h"><h3>Event log</h3></div>
+      <div class="log" id="log"></div>
+    </section>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/loaders/GLTFLoader.js"></script>
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>

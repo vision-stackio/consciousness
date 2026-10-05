@@ -1,0 +1,175 @@
+/**
+ * Vision's visual processing, pure math (no DOM) so it can be tested headlessly.
+ *
+ *   PixelAnalyzer : works on any webcam with no downloads. Motion, presence (difference
+ *                   from a slowly-learned background), lighting changes, a bounding box.
+ *                   It can say "something is there", not "what".
+ *   SightTracker  : turns noisy per-frame detections (from the pixel analyzer or from an
+ *                   object-detection model) into stable events: appeared / left.
+ */
+
+export interface Detection { label: string; score: number; cx: number; cy: number; w: number; h: number; color?: string; source?: "camera" | "arena" } // normalized 0..1
+export interface Sight extends Detection { size: number }                                               // size = w*h
+export interface SightEvent {
+  type: "appeared" | "left"; label: string; side: "left" | "center" | "right"; near: boolean; durationMs?: number;
+  size?: number; cx?: number; color?: string; source?: "camera" | "arena"; score?: number;
+}
+
+export interface FrameStats {
+  brightness: number;   // 0..1
+  motion: number;       // fraction of pixels that changed since the last frame
+  cx: number; cy: number; // centroid of that motion, 0..1
+  presence: number;     // fraction of pixels that differ from the learned background
+  box: { cx: number; cy: number; w: number; h: number } | null; // bounding box of the "present" region
+  lightingChange: boolean;
+}
+
+export class PixelAnalyzer {
+  private prev: Uint8Array | null = null;
+  private bg: Float32Array | null = null;
+
+  constructor(readonly w = 80, readonly h = 60, private motionThr = 18, private presenceThr = 28, private minPresence = 0.015) {}
+
+  reset() { this.prev = null; this.bg = null; }
+
+  /** gray: w*h luma values 0..255 */
+  analyze(gray: Uint8Array): FrameStats {
+    const { w, h } = this, n = w * h;
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += gray[i];
+    const brightness = sum / n / 255;
+    if (!this.bg || !this.prev) {
+      this.bg = Float32Array.from(gray); this.prev = Uint8Array.from(gray);
+      return { brightness, motion: 0, cx: 0.5, cy: 0.5, presence: 0, box: null, lightingChange: false };
+    }
+    let mc = 0, msx = 0, msy = 0, pc = 0, x0 = w, x1 = -1, y0 = h, y1 = -1;
+    const present = new Uint8Array(n);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (Math.abs(gray[i] - this.prev[i]) > this.motionThr) { mc++; msx += x; msy += y; }
+        if (Math.abs(gray[i] - this.bg[i]) > this.presenceThr) {
+          pc++; present[i] = 1;
+          if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+      }
+    }
+    const presence = pc / n, motion = mc / n;
+    // The whole picture changed (lights on/off, camera bumped): relearn the background instead of calling it "someone".
+    if (presence > 0.6) {
+      this.bg = Float32Array.from(gray); this.prev = Uint8Array.from(gray);
+      return { brightness, motion, cx: 0.5, cy: 0.5, presence: 0, box: null, lightingChange: true };
+    }
+    // Learn the background slowly, but never inside the region where someone is standing still.
+    for (let i = 0; i < n; i++) if (!present[i]) this.bg[i] += (gray[i] - this.bg[i]) * 0.02;
+    this.prev = Uint8Array.from(gray);
+
+    const box = presence >= this.minPresence && x1 >= x0
+      ? { cx: (x0 + x1 + 1) / 2 / w, cy: (y0 + y1 + 1) / 2 / h, w: (x1 - x0 + 1) / w, h: (y1 - y0 + 1) / h } : null;
+    return { brightness, motion, cx: mc ? msx / mc / w : 0.5, cy: mc ? msy / mc / h : 0.5, presence, box, lightingChange: false };
+  }
+}
+
+export class SightTracker {
+  private st = new Map<string, { hits: number; present: boolean; lastSeen: number; firstSeen: number; sight: Sight }>();
+  constructor(private confirm = 2, private absentMs = 3500) {}
+
+  private sideOf = (cx: number): "left" | "center" | "right" => (cx < 0.38 ? "left" : cx > 0.62 ? "right" : "center");
+
+  update(dets: Detection[], now: number): SightEvent[] {
+    const events: SightEvent[] = [];
+    const best = new Map<string, Detection>();
+    for (const d of dets) { const b = best.get(d.label); if (!b || d.w * d.h > b.w * b.h) best.set(d.label, d); }
+
+    for (const [label, d] of best) {
+      const s = this.st.get(label) ?? { hits: 0, present: false, lastSeen: now, firstSeen: now, sight: { ...d, size: d.w * d.h } };
+      s.hits++; s.lastSeen = now; s.sight = { ...d, size: d.w * d.h };
+      if (!s.present && s.hits >= this.confirm) {
+        s.present = true; s.firstSeen = now;
+        events.push({ type: "appeared", label, side: this.sideOf(d.cx), near: s.sight.size > 0.12, size: s.sight.size, cx: d.cx, color: d.color, source: d.source, score: d.score });
+      }
+      this.st.set(label, s);
+    }
+    for (const [label, s] of this.st) {
+      if (best.has(label)) continue;
+      s.hits = 0;
+      if (s.present && now - s.lastSeen > this.absentMs) {
+        s.present = false;
+        events.push({ type: "left", label, side: this.sideOf(s.sight.cx), near: false, durationMs: now - s.firstSeen });
+      }
+    }
+    return events;
+  }
+
+  current(): Sight[] {
+    return [...this.st.values()].filter((s) => s.present).map((s) => s.sight).sort((a, b) => b.size - a.size);
+  }
+  sideOfSight(s: Sight) { return this.sideOf(s.cx); }
+  clear() { this.st.clear(); }
+}
+
+// ------------------------------------------------------------------ colour ---
+/** Name a colour in plain words. */
+export function colorName(r: number, g: number, b: number): string {
+  const mx = Math.max(r, g, b) / 255, mn = Math.min(r, g, b) / 255, d = mx - mn;
+  const v = mx, sat = mx === 0 ? 0 : d / mx;
+  if (v < 0.16) return "black";
+  if (sat < 0.18) return v > 0.78 ? "white" : v > 0.32 ? "gray" : "black";
+  let h = 0;
+  if (d > 0) {
+    if (mx === r / 255) h = ((g - b) / 255 / d) % 6; else if (mx === g / 255) h = (b - r) / 255 / d + 2; else h = (r - g) / 255 / d + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  if (h < 15 || h >= 340) return sat < 0.45 && v > 0.7 ? "pink" : "red";
+  if (h < 45) return v < 0.66 ? "brown" : "orange";
+  if (h < 70) return v < 0.5 ? "brown" : "yellow";
+  if (h < 170) return "green";
+  if (h < 200) return "teal";
+  if (h < 255) return "blue";
+  if (h < 290) return "purple";
+  return "pink";
+}
+
+/** The main colour inside a detection box (centre 60% of it, majority vote). Box is in display (mirrored) coordinates. */
+export function dominantColor(rgba: ArrayLike<number>, w: number, h: number, box: { cx: number; cy: number; w: number; h: number }, mirrored = true): string | undefined {
+  const cx = mirrored ? 1 - box.cx : box.cx;
+  const x0 = Math.max(0, Math.floor((cx - box.w * 0.3) * w)), x1 = Math.min(w - 1, Math.ceil((cx + box.w * 0.3) * w));
+  const y0 = Math.max(0, Math.floor((box.cy - box.h * 0.3) * h)), y1 = Math.min(h - 1, Math.ceil((box.cy + box.h * 0.3) * h));
+  const votes = new Map<string, number>();
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const i = (y * w + x) * 4, name = colorName(rgba[i], rgba[i + 1], rgba[i + 2]);
+    votes.set(name, (votes.get(name) ?? 0) + 1);
+  }
+  let best: string | undefined, n = 0;
+  for (const [k, c] of votes) if (c > n) { best = k; n = c; }
+  return best;
+}
+
+// ------------------------------------------------------------- the arena ---
+export interface ArenaObject { id: string; label: string; x: number; z: number; r: number } // r in world units
+const norm180 = (a: number) => (((a % 360) + 540) % 360) - 180;
+
+/** "toy_red" -> "red toy", random gift ids -> "new toy", landmarks keep their name. */
+export function arenaLabel(id: string): string {
+  const m = id.match(/^toy_([a-z]+)$/);
+  if (m && ["red", "blue", "green", "yellow", "orange", "purple", "pink"].includes(m[1])) return `${m[1]} toy`;
+  if (/^toy_/.test(id)) return "new toy";
+  return id.replace(/_/g, " ");
+}
+
+/**
+ * What the robot can see of the 3D arena from where it stands: objects inside its field of view
+ * and range, with where they appear (cx: 0 = far left, 1 = far right) and how big they look.
+ */
+export function worldDetections(p: { x: number; z: number; headingDeg: number; unit: number }, objs: ArenaObject[], o = { fov: 130, range: 24 }): Detection[] {
+  const out: Detection[] = [];
+  for (const ob of objs) {
+    const dx = ob.x - p.x, dz = ob.z - p.z, dist = Math.hypot(dx, dz) / p.unit;
+    if (dist > o.range || dist < 0.3) continue;
+    const bearing = norm180((Math.atan2(dx, dz) * 180) / Math.PI - p.headingDeg);
+    if (Math.abs(bearing) > o.fov / 2) continue;
+    const size = Math.min(0.5, Math.max(0.04, (2 * ob.r * 1.2) / (dist * p.unit)));
+    out.push({ label: ob.label, score: 1, cx: 0.5 + bearing / o.fov, cy: 0.65, w: size, h: size, source: "arena" });
+  }
+  return out;
+}

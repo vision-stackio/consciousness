@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "ES2022", "moduleResolution": "bundler", "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true, "allowJs": true, "checkJs": false, "rootDir": "src", "outDir": "js", "skipLibCheck": true, "sourceMap": false
+  },
+  "include": ["src/**/*"]
+}
