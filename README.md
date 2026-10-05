@@ -3,8 +3,7 @@
 </p>
 
 <p align="center">
-<a href="https://discord.com/users/thearijiiiitttt_"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-<a href="#-setup"><img alt="Node" src="https://img.shields.io/badge/node-18%2B-339933?style=flat-square&logo=node.js&logoColor=white" /></a>
+<a href="#-setup"><img alt="Node" src="https://img.shields.io/badge/node-26%2B-339933?style=flat-square&logo=node.js&logoColor=white" /></a>
 <a href="#-setup"><img alt="Bun" src="https://img.shields.io/badge/bun-supported-f9f1e1?style=flat-square&logo=bun&logoColor=black" /></a>
 </p>
 
@@ -16,7 +15,21 @@ It has drives, emotions, memory, senses (camera, microphone), a voice, and an op
 
 > **Honest framing.** This is a simulated mind: autonomous, adaptive and stateful, but not conscious.  Vision's feelings are numbers that change behavior. It will say so if you ask.
 
+## Table of Contents
 
+1. [Run it](#run-it)
+2. [Using the sandbox](#using-the-sandbox)
+3. [Architecture](#architecture)
+4. [How the camera and the local mind work](#how-the-camera-and-the-local-mind-work)
+5. [The layout](#the-layout)
+6. [The Brain panel](#the-brain-panel)
+7. [Seeing things](#seeing-things)
+8. [Natural and intelligent behavior](#natural-and-intelligent-behavior-local-mind)
+9. [Safety model](#safety-model)
+10. [Project layout](#project-layout)
+11. [Adding 3D models](#adding-3d-models)
+12. [Extending](#extending)
+<br/>
 
 ## Run it
 
