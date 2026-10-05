@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Vision · Consciousness Sandbox</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 <link rel="icon" type="image/png" href="./assets/logo/Vision.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -70,7 +71,7 @@
     <div class="caption" id="caption"></div>
     <div class="pip" id="pip"><div class="pip-view"><video id="cam" playsinline muted></video><canvas id="pipOverlay"></canvas></div><div class="pip-bar"><span id="pipMotion"></span></div><div class="pip-status" id="pipStatus">camera off</div></div>
     <form class="dock" id="talkForm">
-      <button type="button" class="mic-btn" id="micBtn" title="Talk (speech recognition)"><span id="micIcon">🎙</span></button>
+      <button type="button" class="mic-btn" id="micBtn" title="Talk (speech recognition)"><span id="micIcon"><i class="fas fa-microphone"></i></span></button>
       <input id="talkText" type="text" placeholder="Say something to Vision…" autocomplete="off" />
       <button type="submit" class="send">Send</button>
     </form>

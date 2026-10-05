@@ -8,8 +8,7 @@
 </p>
 
 <p align="center">
-<b>Consciousness, a sandbox for Vision</b> : A Node + TypeScript sandbox where Vision, your 3D robot, lives in an arena and decides for itself what to do.  
-It has drives, emotions, memory, senses (camera, microphone), a voice, and an optional LLM "cortex".
+<b>Consciousness, a sandbox for Vision</b>
 </p>
 
 
