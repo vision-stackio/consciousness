@@ -13,7 +13,7 @@ It has drives, emotions, memory, senses (camera, microphone), a voice, and an op
 </p>
 
 
-> **Honest framing.** This is a simulated mind: autonomous, adaptive and stateful, but not conscious.  Vision's feelings are numbers that change behavior. It will say so if you ask.
+> **⚠️ Honest framing.** This is a simulated mind: autonomous, adaptive and stateful, but not conscious.  Vision's feelings are numbers that change behavior. It will say so if you ask.
 
 ## Table of Contents
 
@@ -162,7 +162,7 @@ A rotating 3D brain (~30 000 neurons, 77 nodes in 37 regions, ~130 pathways) tak
 
 - Slow machine? Open the page with `?density=0.5`.
 
-> **Honest limits.** This is a functional model, not a biological simulation. Region positions and the cortical surface are stylised, and the numbers are tuned for sensible behavior, not fitted to data. It is still a simulation of emotion, not a feeling creature.
+> **⚠️ Honest limits.** This is a functional model, not a biological simulation. Region positions and the cortical surface are stylised, and the numbers are tuned for sensible behavior, not fitted to data. It is still a simulation of emotion, not a feeling creature.
 
 
 
