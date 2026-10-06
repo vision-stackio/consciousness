@@ -72,16 +72,36 @@ export function createSpeechController({ onInterim, onFinal, onListeningChange }
     onListeningChange?.(false);
   }
 
-  /** @param {string} text @param {{ onEnd?: () => void, rate?: number, pitch?: number }} [opts] */
-  function speak(text, { onEnd, rate = 1.02, pitch = 1.05 } = {}) {
+  /**
+   * Speak with full prosody control.
+   * @param {string} text
+   * @param {{ onEnd?: () => void, rate?: number, pitch?: number, volume?: number, voiceName?: string }} [opts]
+   */
+  function speak(text, { onEnd, rate = 1.02, pitch = 1.05, volume = 1.0, voiceName } = {}) {
     if (!window.speechSynthesis || !text) {
       onEnd?.();
       return;
     }
     window.speechSynthesis.cancel(); // don't stack up overlapping utterances
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = rate;
-    utterance.pitch = pitch;
+    utterance.rate = Math.max(0.6, Math.min(1.6, rate));
+    utterance.pitch = Math.max(0.5, Math.min(1.8, pitch));
+    utterance.volume = Math.max(0.2, Math.min(1, volume));
+
+    // Prefer a consistent English voice when available
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length) {
+      let chosen = null;
+      if (voiceName) chosen = voices.find((v) => v.name === voiceName);
+      if (!chosen) {
+        chosen =
+          voices.find((v) => /en(-|_)?(US|GB)/i.test(v.lang) && /female|natural|google|samantha|zira/i.test(v.name)) ||
+          voices.find((v) => /en(-|_)?(US|GB)/i.test(v.lang)) ||
+          voices[0];
+      }
+      if (chosen) utterance.voice = chosen;
+    }
+
     utterance.onend = () => onEnd?.();
     utterance.onerror = () => onEnd?.();
     window.speechSynthesis.speak(utterance);
@@ -93,5 +113,6 @@ export function createSpeechController({ onInterim, onFinal, onListeningChange }
     stopListening,
     speak,
     isListening: () => listening,
+    getVoices: () => (window.speechSynthesis ? window.speechSynthesis.getVoices() : []),
   };
 }

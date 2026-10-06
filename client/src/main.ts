@@ -2,7 +2,7 @@
  * Sandbox entry point: wires the 3D body, the senses, the voice, the brain and the UI.
  * Everything Vision does goes through executeInstructions(), the single motor gate.
  */
-import { Brain, ARENA, type Instr, type Mode, type MindSnapshot, type Stimulus, type WorldObject, type EventType } from "./brain.js";
+import { Brain, ARENA, ARENA_INFINITE, type Instr, type Mode, type MindSnapshot, type Stimulus, type WorldObject, type EventType } from "./brain.js";
 import { Senses } from "./senses.js";
 import { askCortex, fetchHealth } from "./cortexClient.js";
 import { Steering, resolveOverlap, type Obstacle } from "./steering.js";
@@ -25,13 +25,39 @@ const GAZE_FLIP = false;
 const eyeDir = () => (GAZE_FLIP ? -1 : 1);
 let stopped = false;               // true while E-STOP is engaged
 let lastUserSpeechAt = -1e9;       // he looks at you for a few seconds after you speak
-// How his voice sounds depends on his mood (rate, pitch).
+// Base voice presets by mood word (rate, pitch). These are refined live by hormones.
 const VOICE: Record<string, [number, number]> = {
   excited: [1.12, 1.2], curious: [1.05, 1.12], attentive: [1.0, 1.08], content: [1.0, 1.05], calm: [0.96, 1.0],
   bored: [0.9, 0.95], lonely: [0.92, 0.98], startled: [1.2, 1.25],
   happy: [1.06, 1.15], afraid: [1.18, 1.22], angry: [1.08, 0.85], sad: [0.86, 0.88], disgusted: [0.95, 0.9], hurt: [0.92, 1.1], sleepy: [0.8, 0.85],
 };
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+/**
+ * Compute natural prosody from the emotional brain.
+ * Rate / pitch / volume are shaped by current emotion + key neuromodulators
+ * so the voice feels like it comes from the same organism as the decisions.
+ */
+function voiceFromBrain(mood: string): { rate: number; pitch: number; volume: number } {
+  const [baseRate, basePitch] = VOICE[mood] ?? [1.02, 1.05];
+  const st = limbic.state();
+  const nm = st.nm;
+  // Arousal-like modulators speed speech up; calming ones slow it down
+  const arousal = (nm.noradrenaline - 0.1) * 0.35 + (nm.adrenaline - 0.05) * 0.4 + (nm.dopamine - 0.1) * 0.2;
+  const calm = (nm.serotonin - 0.4) * 0.25 + (nm.gaba - 0.3) * 0.15 + (nm.melatonin - 0.1) * 0.5;
+  const stress = (nm.cortisol - 0.1) * 0.3;
+  // Pitch rises with positive affect and arousal, drops with sadness / high cortisol
+  const affect = st.emotion === "HAPPY" || st.emotion === "EXCITED" || st.emotion === "CURIOUS" ? 0.12
+    : st.emotion === "SAD" || st.emotion === "PAIN" ? -0.12
+    : st.emotion === "ANGRY" ? -0.08
+    : st.emotion === "FEARFUL" || st.emotion === "SURPRISED" ? 0.1 : 0;
+
+  const rate = clamp(baseRate + arousal * 0.35 - calm * 0.4 + stress * 0.15, 0.72, 1.45);
+  const pitch = clamp(basePitch + affect + arousal * 0.18 - calm * 0.12 - stress * 0.1, 0.7, 1.55);
+  // Slightly quieter when sleepy or very stressed, brighter when excited
+  const volume = clamp(0.92 + (nm.dopamine - 0.1) * 0.25 - (nm.melatonin - 0.1) * 0.35 - Math.max(0, nm.cortisol - 0.25) * 0.2, 0.55, 1);
+  return { rate, pitch, volume };
+}
 
 // ---------------------------------------------------------------- world ----
 const world: WorldObject[] = [];       // what Vision knows about (toys, landmarks)
@@ -56,7 +82,7 @@ async function addScenery(o: { id: string; url: string; x: number; z: number; si
 (window as any).vision = { addScenery, world, obstacles }; // handy from the browser console
 function placeProps() {
   unit = Rig.getPosition().unit;
-  Rig.addProp({ id: "arena", kind: "ring", x: 0, z: 0, color: 0xa78bfa, radius: ARENA * unit });
+  if (!ARENA_INFINITE) Rig.addProp({ id: "arena", kind: "ring", x: 0, z: 0, color: 0xa78bfa, radius: ARENA * unit });
   const add = (o: WorldObject) => { world.push(o); Rig.addProp({ id: o.id, kind: o.kind, x: o.x, z: o.z, color: parseInt(o.color.slice(1), 16), radius: unit }); obstacles.push({ id: o.id, x: o.x, z: o.z, r: unit * 0.35 }); };
   add({ id: "toy_red", kind: "toy", x: 14 * unit, z: 2 * unit, color: "#ef4444" });
   add({ id: "toy_blue", kind: "toy", x: -10 * unit, z: 18 * unit, color: "#38bdf8" });
@@ -98,8 +124,13 @@ const speech = createSpeechController({
 function speak(text: string) {
   if (!text || !voiceOn) return;
   speaking = true; senses.muted = true;
-  const [rate, pitch] = VOICE[brain.mood()] ?? [1.02, 1.05];
-  speech.speak(text, { rate, pitch, onEnd: () => setTimeout(() => { speaking = false; senses.muted = false; }, 450) });
+  const prosody = voiceFromBrain(brain.mood());
+  speech.speak(text, {
+    rate: prosody.rate,
+    pitch: prosody.pitch,
+    volume: prosody.volume,
+    onEnd: () => setTimeout(() => { speaking = false; senses.muted = false; }, 450),
+  });
 }
 
 const angleDiff = (a: number, b: number) => (((a - b) % 360) + 540) % 360 - 180;
@@ -199,6 +230,8 @@ const brain = new Brain(
     onEvent: addLog,
     onFeel: (kind, detail) => limbic.feel(kind, detail),
     getChem: () => limbic.state(),
+    onOutcome: (reward) => limbic.externalOutcome(reward),
+    getLearning: () => limbic.learningState(),
     getSenses: () => {
       // what he sees = the camera + the arena objects in front of him
       const r = senses.read();
@@ -226,6 +259,23 @@ function renderMind(m: MindSnapshot) {
 function handleUserText(text: string) {
   lastUserSpeechAt = performance.now();
   showCaption("user", text);
+
+  // Teach face / name: "my name is Ada", "this is Bob", "call me Sam", "I am Maya"
+  const teach = text.match(/^(?:my name is|i(?:'m| am)|this is|call me|remember me as)\s+([a-zA-Z][\w' -]{0,36})$/i);
+  if (teach) {
+    void senses.teachPerson(teach[1]).then((r) => {
+      if (r.ok) brain.noteSharedKnowledge(`their name is ${teach[1]}`);
+      showCaption("assistant", r.message); speak(r.message); addLog("system", `teach: ${r.message}`);
+    });
+    return;
+  }
+  if (/^(forget (?:everyone|all names|all people)|clear names)$/i.test(text.trim())) {
+    senses.forgetPerson();
+    const reply = "okay, I forgot the names I learned";
+    showCaption("assistant", reply); speak(reply); addLog("system", reply);
+    return;
+  }
+
   const local = brain.hear(text);
   if (!local) return;                                   // AI mode: the cortex will answer
   const stopNow = local.instructions.some((i) => i.op === "EXEC" && i.command === "WALK_STOP") && /stop/i.test(local.reply);
@@ -253,7 +303,7 @@ window.addEventListener("keydown", (e) => { if (e.key === "Escape") estop(); });
 // Reflexes, 20 Hz, never waiting for any decision maker: arena wall, obstacle steering, no-clipping.
 setInterval(() => {
   const p = Rig.getPosition();
-  if (Rig.isWalking() && Math.hypot(p.x, p.z) > ARENA * p.unit) {
+  if (!ARENA_INFINITE && Rig.isWalking() && Math.hypot(p.x, p.z) > ARENA * p.unit) {
     motionToken++; wandering = false; Rig.setWalking(false);
     Rig.setBodyTurn((Math.atan2(-p.x, -p.z) * 180) / Math.PI);
     brain.note("I bumped into the arena wall and stopped");
@@ -282,6 +332,17 @@ $<HTMLInputElement>("tglCam").addEventListener("change", async (e) => {
   if (box.checked) $("pip").classList.add("show"); // a display:none video may never decode frames, so show it first
   await toggleDevice(box, "camNote", () => senses.enableCamera(), () => senses.disableCamera());
   $("pip").classList.toggle("show", senses.cameraOn);
+  if (senses.cameraOn) {
+    // Immediately orient toward the screen / viewer
+    wandering = false;
+    Rig.setWalking(false);
+    Rig.faceViewer?.();
+    Rig.setEyeAngle(90);
+    gazeAngle = 90;
+    gazeGoal = 90;
+    $("bodyState").textContent = "Looking";
+    addLog("system", "camera on — facing you");
+  }
 });
 $<HTMLInputElement>("tglMic").addEventListener("change", (e) => {
   const box = e.target as HTMLInputElement;
@@ -343,8 +404,8 @@ setInterval(() => {
   $("seeing").textContent = arenaNames.length ? `${cam} · Arena: ${arenaNames.join(", ")}` : cam;
 }, 200);
 
-// Gaze: alive eyes. He looks at whoever is talking, follows a person (or the biggest thing, or recent movement)
-// seen by the camera, and otherwise glances around the way a curious creature does (small, irregular, mood-dependent).
+// Gaze + body orientation toward the camera/user.
+// Visual servoing on pixel error: turn until the person is centered (no accumulating yaw bug).
 let gazeAngle = 90, gazeGoal = 90, nextSaccade = 0;
 const glanceAtToy = (): number | null => {
   const p = Rig.getPosition(), toys = world.filter((o) => o.kind === "toy");
@@ -354,26 +415,74 @@ const glanceAtToy = (): number | null => {
   return clamp(90 + eyeDir() * clamp(rel, -50, 50) * 0.8, 35, 145);
 };
 setInterval(() => {
-  if (brain.mode === "off" || stopped || eyeLock > 0) return;
+  if (brain.mode === "off" || stopped) return;
   const now = performance.now();
-  const target = senses.cameraOn ? senses.gazeTarget() : null;
-  if (now - lastUserSpeechAt < 3000) gazeGoal = 90;                                   // eye contact with whoever is talking
-  else if (target) gazeGoal = 90 + eyeDir() * (target.cx - 0.5) * 2 * 55;             // follow what the camera sees
-  else if (now > nextSaccade) {                                                       // idle glances
+  const camOn = senses.cameraOn;
+  const target = camOn ? senses.gazeTarget() : null;
+  const person = camOn && (senses.personPresent || !!target);
+
+  // Someone on camera → stop free wandering so he can face you
+  if (person && wandering && navActive === 0) {
+    wandering = false;
+    Rig.setWalking(false);
+    $("bodyState").textContent = "Looking";
+  }
+
+  if (eyeLock > 0) {
+    // Scripted action owns the eyes this frame
+  } else if (now - lastUserSpeechAt < 4000) {
+    gazeGoal = 90; // eye contact while you talk
+  } else if (target) {
+    const err = target.cx - 0.5; // >0 → person on the right of the preview
+    gazeGoal = clamp(90 + eyeDir() * err * 2 * 60, 20, 160);
+  } else if (camOn) {
+    gazeGoal = 90; // camera on, no target yet → look straight at the lens
+  } else if (now > nextSaccade) {
     const m = brain.mood();
     const spread = Rig.isWalking() ? 8 : m === "curious" || m === "bored" ? 38 : m === "attentive" ? 14 : 22;
     gazeGoal = Math.random() < 0.18 ? glanceAtToy() ?? 90 : 90 + (Math.random() * 2 - 1) * spread;
     nextSaccade = now + 1200 + Math.random() * 3200;
   }
-  gazeAngle += (gazeGoal - gazeAngle) * 0.3;
-  Rig.setEyeAngle(clamp(gazeAngle, 0, 180));
-}, 70);
+
+  if (eyeLock <= 0) {
+    gazeAngle += (gazeGoal - gazeAngle) * 0.35;
+    Rig.setEyeAngle(clamp(gazeAngle, 0, 180));
+  }
+
+  // Face the screen / viewer when camera is on; fine-tune with pixel error
+  if (navActive === 0 && !Rig.isWalking() && camOn) {
+    // Base: orient body toward the 3D view camera (the user looking at the page)
+    const faceDeg = typeof Rig.faceViewer === "function" ? (Rig.getViewThetaDeg?.() ?? 0) : 0;
+    const err = target ? (target.cx - 0.5) : 0;
+    // Absolute heading = face screen + small offset from where the person sits in frame
+    const desired = faceDeg + eyeDir() * err * 40;
+    const cur = Rig.getBodyTurn();
+    const diff = angleDiff(desired, cur);
+    if (Math.abs(diff) > 1) Rig.setBodyTurn(cur + clamp(diff, -8, 8));
+  }
+}, 50);
 
 document.querySelectorAll<HTMLElement>("[data-stim]").forEach((b) => b.addEventListener("click", () => {
   const k = b.dataset.stim!;
   if (k === "teleport") { const a = Math.random() * 6.28; Rig.setPosition(Math.sin(a) * 34 * unit, Math.cos(a) * 34 * unit); brain.stimulus("teleport"); }
   else if (k === "skip") { brain.fastForward(60); for (let i = 0; i < 240; i++) limbic.step(0.25); }
-  else if (k === "reset") { try { localStorage.removeItem("vision.mind.v3"); } catch { /* ignore */ } location.reload(); }
+  else if (k === "teach") {
+    const name = prompt("What should I call you? (face the camera, good light)");
+    if (name) {
+      void senses.teachPerson(name).then((r) => {
+        showCaption("assistant", r.message); speak(r.message); addLog("system", `teach: ${r.message}`);
+      });
+    }
+  }
+  else if (k === "reset") {
+    try {
+      localStorage.removeItem("vision.mind.v3");
+      localStorage.removeItem("vision.brain.learn.v1");
+      localStorage.removeItem("vision.knownPeople.v1");
+      localStorage.removeItem("vision.faceEmbeddings.v1");
+    } catch { /* ignore */ }
+    location.reload();
+  }
   else if (k === "gift") {
     const id = `toy_${Math.random().toString(36).slice(2, 5)}`; const p = Rig.getPosition(); const a = Math.random() * 6.28;
     const o: WorldObject = { id, kind: "toy", x: p.x + Math.sin(a) * 8 * unit, z: p.z + Math.cos(a) * 8 * unit, color: "#f59e0b" };

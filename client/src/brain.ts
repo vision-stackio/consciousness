@@ -2,10 +2,16 @@
  * Vision's mind. Two layers share one body of state:
  *
  *   drives + emotion + 3-tier memory   (always running, local, free)
- *   decision maker                     "local" = utility AI + learning
- *                                      "ai"    = LLM cortex chooses, validated here
+ *   decision maker                     ALWAYS the local utility AI + learning,
+ *                                      strongly driven by the emotional brain state
+ *                                      (hormones, instinct, learned values).
  *
- * Reflexes (startle, arena wall) never wait for the LLM.
+ *   "ai" mode                          LLM is used ONLY for natural language
+ *                                      generation (what he says). It never
+ *                                      chooses actions. The simulated brain
+ *                                      remains the source of intelligence.
+ *
+ * Reflexes (startle, arena wall) never wait for anything.
  * Honest framing: this is a simulated mind. It is autonomous, not conscious.
  */
 
@@ -77,6 +83,10 @@ export interface BrainOptions {
   onFeel?: (kind: FeelKind, detail?: string) => void;
   /** Read back the emotional brain: emotion + hormones. They bias what he wants to do. */
   getChem?: () => LimbicState | undefined;
+  /** Push a real behavioural outcome into the neural learning system. */
+  onOutcome?: (reward: number) => void;
+  /** Optional: read neural learning diagnostics (RPE, values…). */
+  getLearning?: () => { rpe?: number; expectedValue?: number } | undefined;
   /** Explore toward unvisited places instead of random headings (default true). */
   smartExplore?: boolean;
   storageKey?: string;
@@ -88,7 +98,8 @@ type ActionName = "wander" | "look_around" | "dance" | "rest" | "call_out" | "mu
 const ACTIONS: ActionName[] = ["wander", "look_around", "dance", "rest", "call_out", "murmur", "go_home", "play", "watch"];
 interface Plan { instr: Instr[]; say?: string; reason: string; effect: ActionName | null; label?: string }
 
-export const ARENA = 40; // arena radius, in body-sizes
+export const ARENA = 40; // used only when ARENA_INFINITE is false
+export const ARENA_INFINITE = true; // no wall, no purple ring, open world
 const CELL = 8;
 
 const clamp = (v: number, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
@@ -168,6 +179,38 @@ const MURMURS: Record<string, string[]> = {
 };
 
 // ----------------------------------------------------------------- brain ---
+
+/** Persistent intention that biases decisions for a while (human-like goal directedness). */
+interface Goal {
+  id: string;
+  kind: "explore" | "social" | "play" | "rest" | "investigate" | "avoid";
+  priority: number;   // 0..1
+  until: number;      // timestamp
+  detail?: string;
+}
+
+/**
+ * Theory-of-mind model of the human: inferred goals, emotional tone,
+ * shared knowledge, and engagement history — not only a few scalars.
+ */
+interface UserModel {
+  friendliness: number;   // -1..1
+  attention: number;      // 0..1
+  predictability: number; // 0..1
+  lastAct: string;
+  trust: number;          // 0..1
+  /** Inferred emotional tone of the human (−1 sad/angry … +1 happy). */
+  mood: number;
+  /** What Vision thinks the human wants right now. */
+  inferredGoal: "chat" | "play" | "show" | "alone" | "unknown";
+  /** Facts Vision believes are mutually known. */
+  sharedKnowledge: string[];
+  /** Recent engagement events for temporal ToM. */
+  recentActs: { act: string; at: number }[];
+  /** Estimated patience (drops if ignored or repeated failures). */
+  patience: number;
+}
+
 export class Brain {
   mode: Mode = "local";
   private curiosity = 0.5; private social = 0.4; private boredom = 0.2;
@@ -201,6 +244,16 @@ export class Brain {
   private now: () => number;
   private scale: number;
   readonly memory: Memory;
+
+  /** Active goals (human-like hierarchical control). */
+  private goals: Goal[] = [];
+  /** Model of the human (theory of mind). */
+  private userModel: UserModel = {
+    friendliness: 0.2, attention: 0.3, predictability: 0.5, lastAct: "", trust: 0.4,
+    mood: 0.1, inferredGoal: "unknown", sharedKnowledge: [], recentActs: [], patience: 0.7,
+  };
+  /** Adaptive exploration temperature (meta-learning). */
+  private exploreTemp = 0.18;
 
   constructor(private body: Body, private opts: BrainOptions = {}) {
     this.now = opts.now ?? (() => Date.now());
@@ -239,16 +292,16 @@ export class Brain {
     const tr = this.memory.long.traits;
     let text = "";
     switch (kind) {
-      case "praise": tr.playful = clamp(tr.playful + 0.03); tr.shy = clamp(tr.shy - 0.02); v(0.35); a(0.2); this.social = clamp(this.social - 0.25); text = "someone praised me"; this.lastUserAt = this.now(); break;
-      case "scold": tr.shy = clamp(tr.shy + 0.04); tr.playful = clamp(tr.playful - 0.02); v(-0.4); a(0.25); text = "someone scolded me"; this.lastUserAt = this.now(); break;
+      case "praise": tr.playful = clamp(tr.playful + 0.03); tr.shy = clamp(tr.shy - 0.02); v(0.35); a(0.2); this.social = clamp(this.social - 0.25); text = "someone praised me"; this.lastUserAt = this.now(); this.updateUserModel("praise"); break;
+      case "scold": tr.shy = clamp(tr.shy + 0.04); tr.playful = clamp(tr.playful - 0.02); v(-0.4); a(0.25); text = "someone scolded me"; this.lastUserAt = this.now(); this.updateUserModel("scold"); break;
       case "loud_noise": tr.shy = clamp(tr.shy + 0.01); a(0.5); v(-0.2); text = "a loud noise nearby"; this.reflex([stopAll(), exec("EYE_SET", 60), sleep(250), exec("EYE_SET", 120), sleep(250), exec("EYE_CENTER")]); break;
-      case "gift": tr.playful = clamp(tr.playful + 0.02); v(0.3); this.boredom = clamp(this.boredom - 0.3); a(0.2); text = "someone dropped a new toy nearby"; break;
+      case "gift": tr.playful = clamp(tr.playful + 0.02); v(0.3); this.boredom = clamp(this.boredom - 0.3); a(0.2); text = "someone dropped a new toy nearby"; this.updateUserModel("gift"); break;
       case "poke": a(0.3); v(0.05); text = "I was poked"; this.lastUserAt = this.now(); break;
       case "motion": a(0.2); this.social = clamp(this.social - 0.08 * f); text = "sudden movement in front of my camera"; if (f > 0.6) this.react(pick(["Whoa, what moved?", "Hey! I saw that."])); break;
       case "dark": v(-0.1); a(-0.1); text = "the lights went out"; this.react("Hey, who turned off the lights?"); break;
       case "bright": a(0.1); text = "the lights came on"; this.react("Ooh, that got bright!"); break;
       case "teleport": a(0.4); v(-0.15); text = "I got picked up and put down somewhere else"; break;
-      case "ignored": this.social = clamp(this.social + 0.4); this.boredom = clamp(this.boredom + 0.3); text = "nobody has talked to me for a long time"; break;
+      case "ignored": this.social = clamp(this.social + 0.4); this.boredom = clamp(this.boredom + 0.3); text = "nobody has talked to me for a long time"; this.updateUserModel("ignore"); break;
     }
     this.feel(kind);
     this.note(text);
@@ -345,6 +398,7 @@ export class Brain {
     this.social = clamp(this.social - 0.5); this.boredom = clamp(this.boredom - 0.3);
     this.arousal = clamp(this.arousal + 0.25);
     this.valence = clamp(this.valence + 0.1 + 0.25 * good - 0.35 * bad, -1, 1);
+    this.updateUserModel(good ? "praise" : bad ? "scold" : "talk");
     this.event("percept", `heard: "${text.slice(0, 80)}"`);
     this.memory.remember("heard", text.slice(0, 60), this.valence, 0.5 + 0.3 * (good + bad));
     this.convoPush("user", text);
@@ -360,22 +414,34 @@ export class Brain {
     if (learned.name || learned.facts.length) this.memory.save();
 
     if (/\b(stop|halt|freeze)\b/.test(t)) return this.say_("Okay, stopping.", [stopAll()]);
+
+    // Local dialogue system is always the first authority for commands and
+    // factual replies. This keeps the simulated brain in control.
+    const ctx = this.dialogueCtx();
+    const res = respond(text, ctx);
+    if (res) {
+      this.lastTopic = res.topic;
+      if (res.effects) {
+        this.valence = clamp(this.valence + (res.effects.valence ?? 0), -1, 1);
+        this.arousal = clamp(this.arousal + (res.effects.arousal ?? 0));
+        this.social = clamp(this.social + (res.effects.social ?? 0));
+      }
+      if (res.command) return this.runCommand(res.command, res.reply, ctx);
+      // Pure conversational reply — in AI mode we can optionally let the LLM
+      // rephrase it more naturally, otherwise use the local line.
+      if (this.mode === "ai" && this.opts.think && !this.thinking) {
+        void this.think(text);          // will only generate speech
+        return null;
+      }
+      return this.say_(res.reply, []);
+    }
+
+    // Nothing the local system recognised — in AI mode ask the LLM for speech only
     if (this.mode === "ai") {
       if (this.thinking) this.pendingHeard = text; else void this.think(text);
       return null;
     }
-
-    const ctx = this.dialogueCtx();
-    const res = respond(text, ctx);
-    if (!res) return null;
-    this.lastTopic = res.topic;
-    if (res.effects) {
-      this.valence = clamp(this.valence + (res.effects.valence ?? 0), -1, 1);
-      this.arousal = clamp(this.arousal + (res.effects.arousal ?? 0));
-      this.social = clamp(this.social + (res.effects.social ?? 0));
-    }
-    if (!res.command) return this.say_(res.reply, []);
-    return this.runCommand(res.command, res.reply, ctx);
+    return null;
   }
 
   /** He decides whether he feels like doing what was asked. */
@@ -448,18 +514,30 @@ export class Brain {
     this.emit();
     if (this.mode === "off" || this.acting > 0 || this.thinking || this.body.isBusy()) return;
 
-    // brainstem: arena safety overrides whatever the decision maker would do
-    if (this.distHome() > ARENA * 0.9) { void this.runLocal("go_home"); return; }
+    // brainstem: arena safety (disabled when ARENA_INFINITE)
+    if (!ARENA_INFINITE && this.distHome() > ARENA * 0.9) { void this.runLocal("go_home"); return; }
 
     const gap = (this.personPresent() ? Math.min(this.nextGap, 2500) : this.nextGap) / this.scale; // more responsive with company
     if (!(this.urgent || (!this.userRecent(8000) && this.now() - this.lastDecisionAt > gap))) return;
     this.urgent = false;
-    if (this.mode === "local") void this.runLocal(this.choose());
-    else void this.think();
+
+    // PRIMARY INTELLIGENCE is always the local mind, driven by brain state.
+    // LLM (if present) is only asked to generate natural speech that fits
+    // the already-chosen action. It never selects what to do.
+    const action = this.choose();
+    if (this.mode === "ai" && this.opts.think) {
+      void this.runLocalWithOptionalSpeech(action);
+    } else {
+      void this.runLocal(action);
+    }
   }
 
   private drift(dt: number) {
-    this.curiosity = clamp(this.curiosity + 0.008 * dt);
+    // Base curiosity rise + extra from neural surprise (large |RPE| → world was
+    // unpredictable → the brain wants to explore more).
+    const ls = this.opts.getLearning?.();
+    const surpriseBoost = ls && typeof ls.rpe === "number" ? Math.min(0.35, Math.abs(ls.rpe) * 0.5) : 0;
+    this.curiosity = clamp(this.curiosity + (0.008 + 0.02 * surpriseBoost) * dt);
     this.social = clamp(this.social + 0.005 * dt * (this.userRecent(30000) ? 0.2 : 1));
     this.boredom = clamp(this.boredom + 0.006 * dt);
     for (const k of Object.keys(this.habit)) this.habit[k] = Math.min(1, this.habit[k] + 0.01 * dt);
@@ -471,6 +549,15 @@ export class Brain {
     const k = Math.min(1, 0.03 * dt);
     this.valence = clamp(this.valence + (base - this.valence) * k, -1, 1);
     this.arousal = clamp(this.arousal + (0.25 + chemA - this.arousal) * Math.min(1, 0.08 * dt));
+
+    // --- Goal formation & decay (hierarchical control) ---
+    this.updateGoals(dt);
+
+    // --- Adaptive exploration temperature (meta-learning) ---
+    // High recent surprise or low trust → explore more; stable success → exploit
+    const targetTemp = 0.12 + 0.12 * surpriseBoost + 0.08 * (1 - this.userModel.predictability) + 0.06 * (1 - this.userModel.trust);
+    this.exploreTemp += (targetTemp - this.exploreTemp) * Math.min(1, 0.04 * dt);
+
     // strong needs are felt by the emotional brain too (rate-limited)
     const t = this.now();
     const tonic = (kind: FeelKind, on: boolean) => { if (on && t - (this.tonicAt[kind] ?? -1e12) > 6000) { this.tonicAt[kind] = t; this.feel(kind); } };
@@ -480,18 +567,33 @@ export class Brain {
     tonic("company", this.personPresent());       // having someone around is quietly rewarding (oxytocin)
   }
 
-  // ----- AI cortex
+  // ----- AI cortex (LANGUAGE ONLY)
+  // The LLM never chooses actions. It may only produce natural speech.
+  // When the user speaks we still let the local dialogue system handle
+  // commands; the LLM can optionally enrich the reply text.
   private async think(heard?: string) {
-    if (!this.opts.think) { this.event("system", "no cortex configured, using local mind"); return this.runLocal(this.choose()); }
+    // Action is always chosen locally
+    const action = this.choose();
+    if (!this.opts.think) {
+      this.event("system", "no cortex configured, using local mind");
+      return this.runLocal(action);
+    }
     this.thinking = true;
-    this.event("system", heard ? "thinking about what I heard..." : "thinking...");
+    this.event("system", heard ? "forming a reply..." : "choosing words...");
     try {
       const req = this.buildRequest(heard);
+      (req as any).forcedAction = action;
+      (req as any).languageOnly = true;
       const d = await this.opts.think(req);
-      await this.runDecision(d);
+      // Ignore any action the LLM might still try to return; only take speech
+      const plan = this.plan(action);
+      const line = cleanSay(d.say);
+      if (line) plan.say = line;
+      this.thought = plan.reason;
+      await this.execute(plan);
     } catch (e) {
-      this.event("system", `cortex unavailable (${(e as Error).message}); falling back to local mind`);
-      if (!heard) await this.runLocal(this.choose());
+      this.event("system", `cortex unavailable (${(e as Error).message}); using local mind`);
+      await this.runLocal(action);
     } finally {
       this.thinking = false;
       this.lastDecisionAt = this.now();
@@ -557,13 +659,171 @@ export class Brain {
     }
   }
 
-  // ----- local decision maker (utility AI + learning)
-  private async runLocal(name: ActionName) { const p = this.plan(name); this.thought = p.reason; if (this.trace) { this.event("system", `scores: ${this.trace} -> ${name}`); this.trace = ""; } await this.execute(p); this.nextGap = rand(2500, 6000); }
+  // ----- local decision maker (utility AI + learning) — PRIMARY INTELLIGENCE
+  private async runLocal(name: ActionName) {
+    const p = this.plan(name);
+    this.thought = p.reason;
+    if (this.trace) { this.event("system", `scores: ${this.trace} -> ${name}`); this.trace = ""; }
+    await this.execute(p);
+    this.nextGap = rand(2500, 6000);
+  }
+
+  /**
+   * Same as runLocal, but if an LLM is available ask it only for a natural
+   * speech line that fits the already-chosen action and current brain state.
+   * The LLM never selects the action.
+   */
+  private async runLocalWithOptionalSpeech(name: ActionName) {
+    const p = this.plan(name);
+    this.thought = p.reason;
+    if (this.trace) { this.event("system", `scores: ${this.trace} -> ${name}`); this.trace = ""; }
+
+    // Only ask the LLM for language when the action naturally involves speech
+    // or when we want a richer murmur. Otherwise keep the local line.
+    const wantsSpeech = name === "call_out" || name === "murmur" || name === "watch" || Math.random() < 0.25;
+    if (wantsSpeech && this.opts.think) {
+      try {
+        this.thinking = true;
+        const req = this.buildRequest();
+        // Tell the cortex the action is already decided; it may only supply "say"
+        (req as any).forcedAction = name;
+        (req as any).languageOnly = true;
+        const d = await this.opts.think(req);
+        const line = cleanSay(d.say);
+        if (line) p.say = line;
+      } catch {
+        // fall through with the local reason / no speech
+      } finally {
+        this.thinking = false;
+      }
+    }
+
+    await this.execute(p);
+    this.nextGap = rand(2500, 6000);
+    this.lastDecisionAt = this.now();
+  }
+
+  // ----- Goals & theory-of-mind ---------------------------------------------
+  private adoptGoal(kind: Goal["kind"], priority: number, durationMs: number, detail?: string) {
+    // Replace any existing goal of the same kind
+    this.goals = this.goals.filter((g) => g.kind !== kind);
+    this.goals.push({ id: `${kind}-${this.now()}`, kind, priority: clamp(priority), until: this.now() + durationMs, detail });
+    // Keep only top 3 by priority
+    this.goals.sort((a, b) => b.priority - a.priority);
+    if (this.goals.length > 3) this.goals.length = 3;
+  }
+
+  private updateGoals(_dt: number) {
+    const t = this.now();
+    this.goals = this.goals.filter((g) => g.until > t);
+    // Form new goals from strong drives / brain state
+    if (this.curiosity > 0.75 && !this.goals.some((g) => g.kind === "explore")) {
+      this.adoptGoal("explore", 0.55 + 0.3 * this.curiosity, 25000);
+    }
+    if (this.social > 0.7 && !this.personPresent() && !this.goals.some((g) => g.kind === "social")) {
+      this.adoptGoal("social", 0.5 + 0.35 * this.social, 20000);
+    }
+    if (this.boredom > 0.72 && this.freeToy() && !this.goals.some((g) => g.kind === "play")) {
+      this.adoptGoal("play", 0.5 + 0.3 * this.boredom, 18000);
+    }
+    const lim = this.chem();
+    if (lim && (lim.nm.cortisol > 0.45 || lim.emotion === "FEARFUL" || lim.emotion === "SAD")) {
+      if (!this.goals.some((g) => g.kind === "rest" || g.kind === "avoid")) {
+        this.adoptGoal(lim.emotion === "FEARFUL" ? "avoid" : "rest", 0.6, 15000);
+      }
+    }
+    if (lim?.instinct === "INVESTIGATE" && (lim.instinctConfidence ?? 0) > 0.55) {
+      this.adoptGoal("investigate", 0.5 + 0.3 * (lim.instinctConfidence ?? 0.5), 12000);
+    }
+  }
+
+  private updateUserModel(kind: "praise" | "scold" | "talk" | "ignore" | "gift" | "presence") {
+    const um = this.userModel;
+    const t = this.now();
+    um.recentActs.push({ act: kind, at: t });
+    if (um.recentActs.length > 24) um.recentActs = um.recentActs.slice(-24);
+
+    switch (kind) {
+      case "praise":
+        um.friendliness = clamp(um.friendliness + 0.12, -1, 1);
+        um.trust = clamp(um.trust + 0.08);
+        um.attention = clamp(um.attention + 0.15);
+        um.mood = clamp(um.mood + 0.15, -1, 1);
+        um.inferredGoal = "chat";
+        um.patience = clamp(um.patience + 0.05);
+        break;
+      case "scold":
+        um.friendliness = clamp(um.friendliness - 0.18, -1, 1);
+        um.trust = clamp(um.trust - 0.1);
+        um.attention = clamp(um.attention + 0.1);
+        um.mood = clamp(um.mood - 0.2, -1, 1);
+        um.inferredGoal = "alone";
+        um.patience = clamp(um.patience - 0.08);
+        break;
+      case "talk":
+        um.attention = clamp(um.attention + 0.2);
+        um.predictability = clamp(um.predictability + 0.03);
+        um.mood = clamp(um.mood + 0.04, -1, 1);
+        um.inferredGoal = "chat";
+        um.patience = clamp(um.patience + 0.02);
+        break;
+      case "ignore":
+        um.attention = clamp(um.attention - 0.08);
+        um.friendliness = clamp(um.friendliness - 0.03, -1, 1);
+        um.inferredGoal = "alone";
+        um.patience = clamp(um.patience - 0.06);
+        break;
+      case "gift":
+        um.friendliness = clamp(um.friendliness + 0.1, -1, 1);
+        um.trust = clamp(um.trust + 0.06);
+        um.mood = clamp(um.mood + 0.12, -1, 1);
+        um.inferredGoal = "play";
+        break;
+      case "presence":
+        um.attention = clamp(um.attention + 0.04);
+        if (um.inferredGoal === "alone") um.inferredGoal = "unknown";
+        break;
+    }
+    // Predictability from consistency of recent acts
+    if (um.recentActs.length >= 4) {
+      const last = um.recentActs.slice(-6).map((a) => a.act);
+      const unique = new Set(last).size;
+      um.predictability = clamp(0.2 + 0.15 * (6 - unique), 0, 1);
+    }
+    um.lastAct = kind;
+  }
+
+  /** Record a mutually known fact (e.g. person's name) for ToM / dialogue. */
+  noteSharedKnowledge(fact: string) {
+    const f = fact.trim().slice(0, 80);
+    if (!f) return;
+    if (!this.userModel.sharedKnowledge.includes(f)) {
+      this.userModel.sharedKnowledge.push(f);
+      if (this.userModel.sharedKnowledge.length > 20) {
+        this.userModel.sharedKnowledge = this.userModel.sharedKnowledge.slice(-20);
+      }
+    }
+  }
+
+  /** Snapshot of the human model (for UI / prompts). */
+  tomState() {
+    const um = this.userModel;
+    return {
+      friendliness: um.friendliness,
+      attention: um.attention,
+      trust: um.trust,
+      mood: um.mood,
+      goal: um.inferredGoal,
+      patience: um.patience,
+      predictability: um.predictability,
+      knows: [...um.sharedKnowledge],
+    };
+  }
 
   private score(a: ActionName): number {
     const { curiosity: c, social: s, boredom: b, valence: v, arousal: ar } = this;
     const company = this.personPresent(), tr = this.memory.long.traits;
-        let u: number;
+    let u: number;
     switch (a) {
       case "wander": u = 0.7 * c + 0.2 * b - (company ? 0.35 : 0); break;
       case "look_around": u = 0.25 + 0.3 * c * (1 - ar) + 0.1 * b; break;
@@ -571,13 +831,15 @@ export class Brain {
       case "rest": u = 0.1 + 0.6 * Math.max(0, ar - 0.5) + (v < -0.2 ? 0.3 : 0); break;
       case "call_out": u = company || this.userRecent(30000) || this.now() - this.lastSpokeAt < 25000 ? -Infinity : 1.1 * Math.max(0, s - 0.45); break;
       case "murmur": u = this.now() - this.lastSpokeAt < 15000 ? -Infinity : 0.1 + 0.2 * b + 0.15 * s; break;
-      case "go_home": u = this.distHome() > ARENA * 0.9 ? 5 : -Infinity; break;
+      case "go_home": u = (!ARENA_INFINITE && this.distHome() > ARENA * 0.9) ? 5 : -Infinity; break;
       case "play": u = this.freeToy() ? 0.6 * c + 0.5 * b + 0.4 * (tr.playful - 0.5) : -Infinity; break;
       case "watch": u = company ? 0.9 + 0.3 * s + 0.3 * (0.5 - tr.shy) - Math.min(0.6, this.presentSecs() / 120) : -Infinity; break;
     }
     if (!Number.isFinite(u)) return u;
+
     // hormones: dopamine = wanting, cortisol = stress/withdrawal, oxytocin = company, melatonin = sleep, acetylcholine = attention
-    const ch = this.chem()?.nm;
+    const lim = this.chem();
+    const ch = lim?.nm;
     if (ch) {
       const dop = ch.dopamine - 0.1, cor = ch.cortisol - 0.1, oxy = ch.oxytocin - 0.1, mel = ch.melatonin - 0.1, ach = ch.acetylcholine - 0.15;
       if (a === "play") u += 0.8 * dop - 0.5 * cor;
@@ -587,6 +849,51 @@ export class Brain {
       if (a === "watch" || a === "call_out") u += 0.6 * oxy;
       if (a === "rest") u += 0.8 * mel + 0.7 * cor;
     }
+
+    // Active goals bias the policy (hierarchical control)
+    for (const g of this.goals) {
+      const w = 0.45 * g.priority;
+      if (g.kind === "explore" && (a === "wander" || a === "look_around")) u += w;
+      if (g.kind === "social" && (a === "call_out" || a === "watch" || a === "murmur")) u += w;
+      if (g.kind === "play" && (a === "play" || a === "dance")) u += w;
+      if (g.kind === "rest" && a === "rest") u += w;
+      if (g.kind === "avoid" && (a === "rest" || a === "look_around")) u += w;
+      if (g.kind === "investigate" && (a === "look_around" || a === "wander" || a === "play")) u += w;
+    }
+
+    // Theory-of-mind: inferred goals, mood, trust, patience modulate social policy
+    const um = this.userModel;
+    if (a === "watch" || a === "call_out") {
+      u += 0.35 * um.friendliness + 0.25 * um.attention + 0.2 * (um.trust - 0.4);
+      if (um.inferredGoal === "chat") u += 0.25;
+      if (um.inferredGoal === "alone") u -= 0.35;
+      if (um.patience < 0.35) u -= 0.2;
+    }
+    if (a === "dance" || a === "play") {
+      u += 0.2 * um.friendliness - 0.25 * Math.max(0, -um.friendliness);
+      if (um.inferredGoal === "play") u += 0.35;
+      if (um.mood < -0.2) u -= 0.25;
+    }
+    if (a === "rest" && (um.inferredGoal === "alone" || um.patience < 0.3)) u += 0.2;
+    if (a === "murmur" && um.sharedKnowledge.length > 0 && um.attention > 0.4) u += 0.12;
+
+    // Strong coupling to the emotional brain's current instinct
+    // (this is how the neural decision layer steers high-level behaviour)
+    if (lim?.instinct) {
+      const inst = lim.instinct.toUpperCase();
+      const boost = 0.55 * (lim.instinctConfidence ?? 0.5);
+      if (inst === "APPROACH" || inst === "GREET") {
+        if (a === "watch" || a === "call_out" || a === "play") u += boost;
+      } else if (inst === "INVESTIGATE") {
+        if (a === "look_around" || a === "wander" || a === "play") u += boost;
+      } else if (inst === "FLEE" || inst === "FREEZE" || inst === "WITHDRAW") {
+        if (a === "rest" || a === "look_around") u += boost;
+        if (a === "dance" || a === "play" || a === "call_out") u -= boost;
+      } else if (inst === "CONFRONT") {
+        if (a === "dance" || a === "call_out") u += boost * 0.6;
+      }
+    }
+
     // experience: what has worked before, overall (15%) and in this exact situation (25%)
     u += 0.15 * (this.memory.long.actionValue[a] ?? 0) + 0.25 * (this.memory.long.ctxValue[this.ctxKey(a)] ?? 0);
     if (this.recent[0] === a) u -= 0.45; else if (this.recent.includes(a)) u -= 0.15;
@@ -598,7 +905,9 @@ export class Brain {
     if (!scored.length) return "look_around";
     this.trace = [...scored].sort((x, y) => y.u - x.u).slice(0, 3).map((x) => `${x.a} ${x.u.toFixed(2)}`).join(" · ");
     const max = Math.max(...scored.map((x) => x.u));
-    const w = scored.map((x) => Math.exp((x.u - max) / 0.18));
+    // Adaptive temperature: higher → more exploration (human-like uncertainty-driven behaviour)
+    const temp = Math.max(0.08, Math.min(0.35, this.exploreTemp));
+    const w = scored.map((x) => Math.exp((x.u - max) / temp));
     let r = Math.random() * w.reduce((s, x) => s + x, 0);
     for (let i = 0; i < scored.length; i++) { r -= w[i]; if (r <= 0) return scored[i].a; }
     return scored[0].a;
@@ -615,7 +924,7 @@ export class Brain {
       const h = ((p.headingDeg + rel) * Math.PI) / 180;
       const tx = p.x + Math.sin(h) * 10 * p.unit, tz = p.z + Math.cos(h) * 10 * p.unit;
       const key = `${Math.floor(tx / (p.unit * CELL))},${Math.floor(tz / (p.unit * CELL))}`;
-      const edge = Math.hypot(tx, tz) / p.unit > ARENA * 0.85;
+      const edge = !ARENA_INFINITE && Math.hypot(tx, tz) / p.unit > ARENA * 0.85;
       const score = (this.opts.smartExplore === false ? 0 : cells.has(key) ? 0 : 1) - (edge ? 2 : 0) - (Math.abs(rel) / 180) * 0.3 + Math.random() * 0.5;
       if (score > best.score) best = { rel, score };
     }
@@ -679,6 +988,9 @@ export class Brain {
         const ck = ctx0 + plan.effect, oc = this.memory.long.ctxValue[ck] ?? 0;
         this.memory.long.ctxValue[ck] = clamp(oc + 0.3 * (reward - oc), -1, 1);
         this.memory.remember(plan.effect, plan.reason, reward, clamp(0.25 + Math.abs(reward) + (novel ? 0.4 : 0)));
+        // Teach the neural layer with the same behavioural outcome so both
+        // levels of intelligence stay aligned.
+        this.opts.onOutcome?.(reward);
       }
       this.journal.push(plan.reason.slice(0, 100)); if (this.journal.length > 8) this.journal.shift();
     } finally {

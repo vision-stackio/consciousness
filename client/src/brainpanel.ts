@@ -78,6 +78,36 @@ export class BrainPanel {
     const d = sim.decision;
     $("brInstinct").innerHTML = `instinct <b>${d.current.toLowerCase()}</b>${d.current === "OBSERVE" ? "" : ` · ${pct(d.confidence)}%`}${d.conflict > 0.5 ? " · hesitating" : ""}`;
 
+    // Live predictive-processing architecture panel
+    const gen = sim.generative;
+    const pe = gen.lastPE;
+    const unc = gen.uncertainty;
+    const epi = gen.epistemicValue(d.current);
+    $("archUnc").textContent = pct(unc) + "%";
+    $("archPE").textContent = pct(pe) + "%";
+    $("archEpi").textContent = pct(epi) + "%";
+
+    const nodes = $("archFlow").querySelectorAll(".arch-node");
+    const hasStim = sim.activeStimulusLabel != null;
+    // Approximate live activity from available signals
+    const levels: Record<string, number> = {
+      percept: hasStim || pe > 0.08 ? 0.7 + 0.3 * pe : 0.1,
+      model: 0.3 + 0.5 * unc,
+      predict: 0.25 + 0.4 * unc,
+      pe: pe,
+      need: Math.max(st.nm.dopamine, st.nm.cortisol, st.nm.oxytocin, st.nm.noradrenaline) * 1.2,
+      act: d.current === "OBSERVE" ? 0.15 : 0.55 + 0.4 * d.confidence,
+      decide: d.current === "OBSERVE" ? 0.1 : 0.7 + 0.3 * d.confidence,
+    };
+    nodes.forEach((el) => {
+      const n = (el as HTMLElement).dataset.n || "";
+      const v = levels[n] ?? 0;
+      el.classList.remove("hot", "hot-pe", "hot-decide");
+      if (n === "pe" && v > 0.18) el.classList.add("hot-pe");
+      else if (n === "decide" && v > 0.35) el.classList.add("hot-decide");
+      else if (v > 0.28) el.classList.add("hot");
+    });
+
     const gc = this.renderer.groupColour();
     for (const [g, li] of this.legendRows) {
       const m = gc.get(g) ?? 0, dot = li.firstElementChild as HTMLElement, c = GROUP_COLOR[g];

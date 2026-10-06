@@ -4,7 +4,6 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Vision · Consciousness Sandbox</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 <link rel="icon" type="image/png" href="./assets/logo/Vision.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -42,8 +41,31 @@
           <div class="chem-title">Hormones &amp; neuromodulators</div>
           <div class="chem-grid" id="chemGrid"></div>
           <div class="brain-instinct" id="brInstinct">instinct <b>observe</b></div>
+          <div class="arch-panel" id="archPanel" title="Live predictive-processing architecture">
+            <div class="arch-title">Architecture · predictive loop</div>
+            <div class="arch-flow" id="archFlow">
+              <span class="arch-node" data-n="percept">Percept</span>
+              <span class="arch-arrow">→</span>
+              <span class="arch-node" data-n="model">Model</span>
+              <span class="arch-arrow">→</span>
+              <span class="arch-node" data-n="predict">Predict</span>
+              <span class="arch-arrow">→</span>
+              <span class="arch-node" data-n="pe">PE</span>
+              <span class="arch-arrow">→</span>
+              <span class="arch-node" data-n="need">Need</span>
+              <span class="arch-arrow">→</span>
+              <span class="arch-node" data-n="act">Act</span>
+              <span class="arch-arrow">→</span>
+              <span class="arch-node" data-n="decide">Decide</span>
+            </div>
+            <div class="arch-metrics">
+              <span>uncertainty <b id="archUnc">—</b></span>
+              <span>pred. error <b id="archPE">—</b></span>
+              <span>epistemic <b id="archEpi">—</b></span>
+            </div>
+          </div>
           <ul class="brain-legend" id="brainLegend"></ul>
-          <p class="brain-note">A functional model, not a biological one. Drag the brain to turn it. <kbd>L</kbd> labels · <kbd>E</kbd> pathways · <kbd>Esc</kbd> closes.</p>
+          <p class="brain-note">A functional model, not a biological one. Drag the brain to turn it. <kbd>L</kbd> labels · <kbd>E</kbd> pathways · <kbd>Esc</kbd> closes. Generative model + prediction error drive curiosity.</p>
         </div>
       </div>
     </section>
@@ -71,7 +93,7 @@
     <div class="caption" id="caption"></div>
     <div class="pip" id="pip"><div class="pip-view"><video id="cam" playsinline muted></video><canvas id="pipOverlay"></canvas></div><div class="pip-bar"><span id="pipMotion"></span></div><div class="pip-status" id="pipStatus">camera off</div></div>
     <form class="dock" id="talkForm">
-      <button type="button" class="mic-btn" id="micBtn" title="Talk (speech recognition)"><span id="micIcon"><i class="fa-solid fa-microphone-lines"></i></span></button>
+      <button type="button" class="mic-btn" id="micBtn" title="Talk (speech recognition)"><span id="micIcon">🎙</span></button>
       <input id="talkText" type="text" placeholder="Say something to Vision…" autocomplete="off" />
       <button type="submit" class="send">Send</button>
     </form>
@@ -97,6 +119,7 @@
         <button data-stim="poke">Poke</button><button data-stim="ignored">Ignore him</button>
         <button data-stim="loud_noise">Loud noise</button><button data-stim="gift">Drop a toy</button>
         <button data-stim="teleport">Teleport far</button><button data-stim="skip">Skip 60 s</button>
+        <button data-stim="teach" class="wide">Teach my face (type your name)</button>
         <button data-stim="reset" class="danger wide">Reset memory</button>
       </div>
     </section>

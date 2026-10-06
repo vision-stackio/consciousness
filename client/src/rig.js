@@ -283,6 +283,11 @@ export const Rig = (function () {
     getPosition: () => ({ x: root ? root.position.x : 0, z: root ? root.position.z : 0, unit: radius }),
     setPosition: (x, z) => { if (root) { root.position.x = x; root.position.z = z; } },
     isWalking: () => mode.walking,
+    /** Turn the robot to face the 3D view camera (the screen / viewer). */
+    faceViewer: () => {
+      bodyTurnDeg = (view.theta * 180) / Math.PI;
+    },
+    getViewThetaDeg: () => (view.theta * 180) / Math.PI,
     addProp,
     addModel,
     removeProp,

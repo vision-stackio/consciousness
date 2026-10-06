@@ -1,6 +1,7 @@
 import { ActionLabel, clamp } from "./types.js";
 import { Reader, emotionScores } from "./emotion.js";
 import { mulberry32, gauss } from "./rng.js";
+import type { GenerativeModel } from "./predictive.js";
 
 export const ACTIONS: ActionLabel[] = ["OBSERVE", "APPROACH", "GREET", "INVESTIGATE", "FLEE", "FREEZE", "CONFRONT", "WITHDRAW", "REJECT", "RECOIL"];
 
@@ -14,11 +15,19 @@ const SUPPORT: Record<ActionLabel, string[]> = {
 export interface Commit { action: ActionLabel; confidence: number; reactionMs: number; because: string }
 
 /**
- * Race model of action selection (cortico-basal-ganglia style):
- * every possible action collects evidence from the regions that argue for it,
- * actions inhibit each other, and the first to cross a threshold is committed.
- * Noradrenaline lowers the threshold (urgency); a close race (ACC conflict)
- * raises it, so the brain "hesitates" when two options are nearly equal.
+ * Race model of action selection (cortico-basal-ganglia style) with
+ * experience-dependent learning + epistemic (information-seeking) value
+ * from the generative / predictive-processing layer.
+ *
+ * - Every action collects evidence from the regions that support it.
+ * - Actions inhibit each other; first to cross a dynamic threshold wins.
+ * - Learned action values (updated by dopamine / reward prediction error)
+ *   bias the evidence accumulation. This is how the brain develops its
+ *   own preferences and "intelligence" from experience instead of
+ *   hard-coded rules.
+ * - Region→action influence gains are also plastic (three-factor rule).
+ * - Epistemic value from the generative model adds curiosity / uncertainty
+ *   reduction drive (active-inference flavour).
  */
 export class DecisionMaker {
   x: Record<ActionLabel, number> = Object.fromEntries(ACTIONS.map((a) => [a, 0])) as Record<ActionLabel, number>;
@@ -27,12 +36,75 @@ export class DecisionMaker {
   confidence = 0;
   threshold = 0.5;
   conflict = 0;
+
+  /** Learned value of each action (-1 .. +1). Starts near 0 and drifts with experience. */
+  value: Record<ActionLabel, number> = Object.fromEntries(ACTIONS.map((a) => [a, 0])) as Record<ActionLabel, number>;
+
+  /** Eligibility trace for credit assignment (decays over ~2-4 s). */
+  private eligibility: Record<ActionLabel, number> = Object.fromEntries(ACTIONS.map((a) => [a, 0])) as Record<ActionLabel, number>;
+
+  /** Plastic gain from each supporting region onto each action (starts at 1). */
+  private regionGain: Record<string, number> = {};
+
   private heldFor = 0;
   private belowFor = 0;
   private sinceOnset = 99;
   private rnd = mulberry32(99);
+  private lastRpe = 0;
+
+  /** Optional link to the generative model for epistemic value. */
+  private gen: GenerativeModel | null = null;
+
+  /** Attach / replace the generative model (called by BrainSim). */
+  setGenerativeModel(g: GenerativeModel | null) { this.gen = g; }
+
+  constructor() {
+    // initialise region gains to 1.0 for every known support link
+    for (const a of ACTIONS) {
+      for (const reg of SUPPORT[a]) {
+        this.regionGain[`${reg}->${a}`] = 1.0;
+      }
+    }
+  }
 
   onStimulus() { this.sinceOnset = 0; }
+
+  /**
+   * Called by BrainSim when a meaningful outcome occurs (reward, threat resolved, etc.).
+   * rpe = reward prediction error (positive = better than expected).
+   * Learning rate is modest so personality changes gradually.
+   */
+  learn(rpe: number, dt: number = 0.05) {
+    this.lastRpe = rpe;
+    const lr = 0.08;           // value learning rate
+    const lrGain = 0.04;       // region-gain learning rate
+    const decay = Math.exp(-dt / 3.0);
+
+    for (const a of ACTIONS) {
+      // value update (actor-critic style)
+      this.value[a] = clamp(this.value[a] + lr * rpe * this.eligibility[a], -1, 1);
+      this.eligibility[a] *= decay;
+
+      // three-factor plasticity on region→action gains
+      if (Math.abs(rpe) > 0.05) {
+        for (const reg of SUPPORT[a]) {
+          const key = `${reg}->${a}`;
+          const g = this.regionGain[key] ?? 1;
+          // only change gains for actions that were recently eligible
+          this.regionGain[key] = clamp(g + lrGain * rpe * this.eligibility[a], 0.25, 2.5);
+        }
+      }
+    }
+  }
+
+  /** Mark the currently selected action as eligible for upcoming reward. */
+  private tagEligibility(action: ActionLabel) {
+    this.eligibility[action] = 1.0;
+    // soft eligibility for similar actions (generalisation)
+    for (const a of ACTIONS) {
+      if (a !== action) this.eligibility[a] = Math.max(this.eligibility[a], 0.15);
+    }
+  }
 
   update(r: Reader, dt: number): Commit | null {
     this.sinceOnset += dt;
@@ -42,17 +114,29 @@ export class DecisionMaker {
     const fear = scores.FEARFUL;
     const social = clamp(0.5 * e("FFA") + 0.3 * e("TPJ") + 0.3 * e("MPFC") + 0.3 * e("WERN"));
 
+    // helper: region activity scaled by learned gain
+    const g = (reg: string, action: ActionLabel) =>
+      e(reg) * (this.regionGain[`${reg}->${action}`] ?? 1);
+
     const inp = this.input;
-    inp.OBSERVE = 0.22;
-    inp.APPROACH = (0.5 * e("NACC") + 0.25 * e("VMPFC") + 0.25 * e("VTA")) * (1 - 0.9 * fear) * (1 - 0.6 * social) * 1.1;
-    inp.GREET = social * (0.25 + pos) * clamp(1 - fear - scores.ANGRY) * 2.0;
-    inp.INVESTIGATE = (0.3 * e("ACC") + 0.25 * e("SC") + 0.25 * e("HIPP") + 0.2 * e("VTA")) * (1 - 0.8 * fear) * 1.9;
-    inp.FREEZE = (0.45 * e("AMY") + 0.25 * e("PAG")) * (0.35 + r.startle) * 1.5;
-    inp.FLEE = fear * (0.95 - 0.55 * r.startle);
-    inp.CONFRONT = scores.ANGRY * 1.9;
-    inp.WITHDRAW = scores.SAD * 1.05;
-    inp.REJECT = scores.DISGUSTED * 1.05;
-    inp.RECOIL = scores.PAIN * 1.1;
+    // Base drives (still present so the system is not blank at birth)
+    // + learned value bias (this is the "own intelligence" component)
+    // + epistemic value from the generative model (curiosity / uncertainty reduction)
+    const valBias = (a: ActionLabel) => 0.55 * this.value[a];
+    const epi = (a: ActionLabel) => this.gen ? 0.55 * this.gen.epistemicValue(a) : 0;
+
+    inp.OBSERVE = 0.22 + valBias("OBSERVE") + epi("OBSERVE");
+    inp.APPROACH = (0.5 * g("NACC", "APPROACH") + 0.25 * g("VMPFC", "APPROACH") + 0.25 * g("VTA", "APPROACH"))
+      * (1 - 0.9 * fear) * (1 - 0.6 * social) * 1.1 + valBias("APPROACH") + epi("APPROACH");
+    inp.GREET = social * (0.25 + pos) * clamp(1 - fear - scores.ANGRY) * 2.0 + valBias("GREET") + epi("GREET");
+    inp.INVESTIGATE = (0.3 * g("ACC", "INVESTIGATE") + 0.25 * g("SC", "INVESTIGATE") + 0.25 * g("HIPP", "INVESTIGATE") + 0.2 * g("VTA", "INVESTIGATE"))
+      * (1 - 0.8 * fear) * 1.9 + valBias("INVESTIGATE") + epi("INVESTIGATE");
+    inp.FREEZE = (0.45 * g("AMY", "FREEZE") + 0.25 * g("PAG", "FREEZE")) * (0.35 + r.startle) * 1.5 + valBias("FREEZE") + epi("FREEZE");
+    inp.FLEE = fear * (0.95 - 0.55 * r.startle) + valBias("FLEE") + epi("FLEE");
+    inp.CONFRONT = scores.ANGRY * 1.9 + valBias("CONFRONT") + epi("CONFRONT");
+    inp.WITHDRAW = scores.SAD * 1.05 + valBias("WITHDRAW") + epi("WITHDRAW");
+    inp.REJECT = scores.DISGUSTED * 1.05 + valBias("REJECT") + epi("REJECT");
+    inp.RECOIL = scores.PAIN * 1.1 + valBias("RECOIL") + epi("RECOIL");
 
     // evidence accumulation with leak, lateral inhibition and noise
     let total = 0;
@@ -76,6 +160,7 @@ export class DecisionMaker {
       this.heldFor = 0;
       this.belowFor = 0;
       this.confidence = clamp(this.x[lead] / (this.threshold * 1.6));
+      this.tagEligibility(lead);
       return { action: lead, confidence: this.confidence, reactionMs: Math.round(this.sinceOnset * 1000), because };
     }
     // when the evidence for the held action fades, go back to watching
@@ -89,8 +174,46 @@ export class DecisionMaker {
     return null;
   }
 
+  /** Snapshot of learned state (useful for debugging / UI). */
+  learnedState() {
+    return {
+      values: { ...this.value },
+      topGains: Object.entries(this.regionGain)
+        .filter(([, g]) => Math.abs(g - 1) > 0.08)
+        .sort((a, b) => Math.abs(b[1] - 1) - Math.abs(a[1] - 1))
+        .slice(0, 8)
+        .map(([k, g]) => `${k}: ${g.toFixed(2)}`),
+      lastRpe: this.lastRpe,
+    };
+  }
+
+  /** Serialize only the durable learned parts (survives page reload). */
+  exportLearning(): { values: Record<string, number>; regionGain: Record<string, number> } {
+    return { values: { ...this.value }, regionGain: { ...this.regionGain } };
+  }
+
+  importLearning(data: { values?: Record<string, number>; regionGain?: Record<string, number> } | null) {
+    if (!data) return;
+    if (data.values) {
+      for (const a of ACTIONS) {
+        if (typeof data.values[a] === "number") this.value[a] = clamp(data.values[a], -1, 1);
+      }
+    }
+    if (data.regionGain) {
+      for (const [k, g] of Object.entries(data.regionGain)) {
+        if (typeof g === "number") this.regionGain[k] = clamp(g, 0.25, 2.5);
+      }
+    }
+  }
+
   reset() {
-    for (const a of ACTIONS) this.x[a] = 0;
+    for (const a of ACTIONS) {
+      this.x[a] = 0;
+      this.value[a] = 0;
+      this.eligibility[a] = 0;
+    }
+    for (const k of Object.keys(this.regionGain)) this.regionGain[k] = 1.0;
     this.current = "OBSERVE"; this.confidence = 0; this.heldFor = 0; this.belowFor = 0; this.sinceOnset = 99;
+    this.lastRpe = 0;
   }
 }

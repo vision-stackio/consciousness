@@ -3,7 +3,12 @@
  * Weights are small on purpose: activity is driven by stimuli and then
  * *spreads* along these pathways, which is what makes the glow travel.
  * Same-side links use the full weight, cross-hemisphere links are 35 %.
+ *
+ * Plasticity: each edge has a base weight (anatomical prior) and a live weight
+ * that slowly changes with experience (Hebbian + dopamine-modulated).
+ * This is the core of the brain developing its own intelligence.
  */
+
 export type Edge = [from: string, to: string, weight: number];
 
 export const EDGES: Edge[] = [
@@ -50,3 +55,11 @@ export const EDGES: Edge[] = [
 ];
 
 export const CONTRALATERAL = 0.35;
+
+/** Runtime plastic edge used by BrainSim */
+export interface PlasticEdge {
+  from: number;
+  to: number;
+  base: number;   // anatomical prior (never forgotten completely)
+  w: number;      // live weight (changes with experience)
+}

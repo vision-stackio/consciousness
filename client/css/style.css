@@ -142,3 +142,19 @@ h3{font:600 10.5px var(--mono);letter-spacing:.09em;text-transform:uppercase;col
   body{overflow:auto}.layout{grid-template-columns:1fr;grid-auto-rows:auto}.stage-panel{height:70vh}
   .col{overflow:visible}.card.grow,.card.brain{flex:none}.brain-view{flex:none;height:260px}.log{max-height:260px}
 }
+
+/* ── architecture / predictive-processing panel ── */
+.arch-panel{margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+.arch-title{font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px}
+.arch-flow{display:flex;flex-wrap:wrap;align-items:center;gap:3px 2px;font:10px/1.2 var(--mono);color:var(--text-3)}
+.arch-node{padding:2px 5px;border-radius:4px;background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);transition:background .25s,border-color .25s,color .25s,box-shadow .25s}
+.arch-node.hot{background:rgba(76,201,240,.12);border-color:#4cc9f0;color:#e6f7ff;box-shadow:0 0 8px rgba(76,201,240,.35)}
+.arch-node.hot-pe{background:rgba(255,59,59,.12);border-color:#ff3b3b;color:#ffd0d0;box-shadow:0 0 8px rgba(255,59,59,.3)}
+.arch-node.hot-decide{background:rgba(255,209,102,.14);border-color:#ffd166;color:#fff3d0;box-shadow:0 0 8px rgba(255,209,102,.35)}
+.arch-arrow{color:var(--text-3);opacity:.55;font-size:9px}
+.arch-metrics{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:7px;font:10px var(--mono);color:var(--text-3)}
+.arch-metrics b{color:var(--text);font-weight:600}
+.brain.big .arch-panel{margin-top:14px}
+.brain.big .arch-flow{font-size:11px;gap:4px 3px}
+.brain.big .arch-node{padding:3px 7px}
+.brain.big .arch-metrics{font-size:11px;gap:10px 18px}

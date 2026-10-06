@@ -186,23 +186,46 @@ export function arenaLabel(id) {
         return `${m[1]} toy`;
     if (/^toy_/.test(id))
         return "new toy";
+    if (/tree|plant/i.test(id))
+        return "tree";
+    if (/rock|stone/i.test(id))
+        return "rock";
+    if (/box|crate/i.test(id))
+        return "box";
+    if (/ball/i.test(id))
+        return "ball";
     return id.replace(/_/g, " ");
 }
 /**
- * What the robot can see of the 3D arena from where it stands: objects inside its field of view
- * and range, with where they appear (cx: 0 = far left, 1 = far right) and how big they look.
+ * Synthetic vision of the 3D arena: projects objects into image-like detections
+ * with distance-dependent confidence, angular size, and depth ordering.
+ * Feeds the same SightTracker path as the camera (not a second neural net).
  */
 export function worldDetections(p, objs, o = { fov: 130, range: 24 }) {
-    const out = [];
+    const candidates = [];
     for (const ob of objs) {
         const dx = ob.x - p.x, dz = ob.z - p.z, dist = Math.hypot(dx, dz) / p.unit;
-        if (dist > o.range || dist < 0.3)
+        if (dist > o.range || dist < 0.25)
             continue;
         const bearing = norm180((Math.atan2(dx, dz) * 180) / Math.PI - p.headingDeg);
         if (Math.abs(bearing) > o.fov / 2)
             continue;
-        const size = Math.min(0.5, Math.max(0.04, (2 * ob.r * 1.2) / (dist * p.unit)));
-        out.push({ label: ob.label, score: 1, cx: 0.5 + bearing / o.fov, cy: 0.65, w: size, h: size, source: "arena" });
+        const ang = Math.min(0.55, Math.max(0.035, (2.4 * ob.r) / (dist * p.unit + 0.01)));
+        const axis = 1 - Math.abs(bearing) / (o.fov / 2);
+        const score = Math.max(0.35, Math.min(0.98, (1 - dist / o.range) * 0.75 + axis * 0.25));
+        const cy = 0.55 + Math.min(0.25, dist * 0.015);
+        candidates.push({
+            label: ob.label, score, cx: 0.5 + bearing / o.fov, cy, w: ang, h: ang * 1.05, source: "arena", dist,
+        });
+    }
+    candidates.sort((a, b) => a.dist - b.dist);
+    const out = [];
+    for (const c of candidates) {
+        const occluded = out.some((n) => Math.abs(n.cx - c.cx) < (n.w + c.w) * 0.35 && (n.w * n.h) > (c.w * c.h) * 1.2);
+        if (occluded && c.dist > 4)
+            continue;
+        const { dist: _d, ...det } = c;
+        out.push(det);
     }
     return out;
 }

@@ -17,11 +17,38 @@ const LOVED = new Set(["cat", "dog", "bird", "teddy bear", "horse", "sheep", "co
 const FOOD = new Set(["pizza", "cake", "apple", "banana", "donut", "sandwich", "orange", "cookie", "hot dog", "broccoli", "carrot"]);
 let counter = 0;
 const mk = (modality, label, a, intensity, duration, extra = {}) => ({ id: `v${(counter++).toString(36)}`, modality, label, appraisal: a, intensity, duration, source: "manual", ...extra });
+const BRAIN_LEARN_KEY = "vision.brain.learn.v1";
 export class Limbic {
     sim = new BrainSim();
     count = new Map();
-    constructor() { this.sim.step(3); } // let the resting state settle
+    saveTimer = 0;
+    constructor() {
+        this.sim.step(3); // let the resting state settle
+        this.loadLearning();
+    }
     bump(key) { const n = (this.count.get(key) ?? 0) + 1; this.count.set(key, n); return n; }
+    loadLearning() {
+        try {
+            const raw = localStorage.getItem(BRAIN_LEARN_KEY);
+            if (raw)
+                this.sim.importLearning(JSON.parse(raw));
+        }
+        catch { /* ignore */ }
+    }
+    saveLearning() {
+        try {
+            localStorage.setItem(BRAIN_LEARN_KEY, JSON.stringify(this.sim.exportLearning()));
+        }
+        catch { /* ignore */ }
+    }
+    /** Call after meaningful experience so learning is not lost on refresh. */
+    persist() { this.saveLearning(); }
+    /** Let the high-level mind inject a real behavioural outcome (reward / failure). */
+    externalOutcome(outcome) {
+        this.sim.externalOutcome(outcome);
+        this.saveTimer = 0; // force a save soon
+    }
+    learningState() { return this.sim.learningState(); }
     /** How Vision's experiences become brain input. Repeats feel less novel (familiarity). */
     stimulusFor(kind, detail = "") {
         const n = this.bump(`${kind}:${detail}`);
@@ -86,13 +113,29 @@ export class Limbic {
             this.sim.stimulate(s);
         }
     }
-    step(dt) { this.sim.step(dt); }
+    step(dt) {
+        this.sim.step(dt);
+        // Persist learned weights every ~25 s of simulated time
+        this.saveTimer += dt;
+        if (this.saveTimer > 25) {
+            this.saveTimer = 0;
+            this.saveLearning();
+        }
+    }
     state() {
         const s = this.sim;
         return {
             emotion: s.emotion.current, intensity: s.emotion.intensity, because: s.emotion.because,
             nm: s.nm, asleep: s.asleep, instinct: s.decision.current, instinctConfidence: s.decision.confidence,
         };
+    }
+    /** Wipe neural learning (called when user hits full reset). */
+    resetLearning() {
+        this.sim.reset();
+        try {
+            localStorage.removeItem(BRAIN_LEARN_KEY);
+        }
+        catch { /* ignore */ }
     }
     /** The chemicals currently above their resting level, strongest first, with what each one does. */
     elevated(limit = 3) {

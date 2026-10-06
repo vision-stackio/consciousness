@@ -1,3 +1,13 @@
+/**
+ * Directed, weighted pathways between regions (+ excitatory, - inhibitory).
+ * Weights are small on purpose: activity is driven by stimuli and then
+ * *spreads* along these pathways, which is what makes the glow travel.
+ * Same-side links use the full weight, cross-hemisphere links are 35 %.
+ *
+ * Plasticity: each edge has a base weight (anatomical prior) and a live weight
+ * that slowly changes with experience (Hebbian + dopamine-modulated).
+ * This is the core of the brain developing its own intelligence.
+ */
 export const EDGES = [
     // vision
     ["LGN", "V1", 0.9], ["V1", "V2V4", 0.8], ["V2V4", "MT", 0.55], ["V2V4", "IT", 0.7], ["V2V4", "FFA", 0.55],

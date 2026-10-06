@@ -33,13 +33,43 @@ let counter = 0;
 const mk = (modality: Modality, label: string, a: Appraisal, intensity: number, duration: number, extra: Partial<Stimulus> = {}): Stimulus =>
   ({ id: `v${(counter++).toString(36)}`, modality, label, appraisal: a, intensity, duration, source: "manual", ...extra });
 
+const BRAIN_LEARN_KEY = "vision.brain.learn.v1";
+
 export class Limbic {
   readonly sim = new BrainSim();
   private count = new Map<string, number>();
+  private saveTimer = 0;
 
-  constructor() { this.sim.step(3); } // let the resting state settle
+  constructor() {
+    this.sim.step(3); // let the resting state settle
+    this.loadLearning();
+  }
 
   private bump(key: string) { const n = (this.count.get(key) ?? 0) + 1; this.count.set(key, n); return n; }
+
+  private loadLearning() {
+    try {
+      const raw = localStorage.getItem(BRAIN_LEARN_KEY);
+      if (raw) this.sim.importLearning(JSON.parse(raw));
+    } catch { /* ignore */ }
+  }
+
+  private saveLearning() {
+    try {
+      localStorage.setItem(BRAIN_LEARN_KEY, JSON.stringify(this.sim.exportLearning()));
+    } catch { /* ignore */ }
+  }
+
+  /** Call after meaningful experience so learning is not lost on refresh. */
+  persist() { this.saveLearning(); }
+
+  /** Let the high-level mind inject a real behavioural outcome (reward / failure). */
+  externalOutcome(outcome: number) {
+    this.sim.externalOutcome(outcome);
+    this.saveTimer = 0; // force a save soon
+  }
+
+  learningState() { return this.sim.learningState(); }
 
   /** How Vision's experiences become brain input. Repeats feel less novel (familiarity). */
   stimulusFor(kind: FeelKind, detail = ""): Stimulus | null {
@@ -95,7 +125,15 @@ export class Limbic {
     if (s) { if (this.sim.asleep && kind !== "loud_noise" && kind !== "teleport") this.sim.wake(); this.sim.stimulate(s); }
   }
 
-  step(dt: number) { this.sim.step(dt); }
+  step(dt: number) {
+    this.sim.step(dt);
+    // Persist learned weights every ~25 s of simulated time
+    this.saveTimer += dt;
+    if (this.saveTimer > 25) {
+      this.saveTimer = 0;
+      this.saveLearning();
+    }
+  }
 
   state(): LimbicState {
     const s = this.sim;
@@ -103,6 +141,12 @@ export class Limbic {
       emotion: s.emotion.current, intensity: s.emotion.intensity, because: s.emotion.because,
       nm: s.nm, asleep: s.asleep, instinct: s.decision.current, instinctConfidence: s.decision.confidence,
     };
+  }
+
+  /** Wipe neural learning (called when user hits full reset). */
+  resetLearning() {
+    this.sim.reset();
+    try { localStorage.removeItem(BRAIN_LEARN_KEY); } catch { /* ignore */ }
   }
 
   /** The chemicals currently above their resting level, strongest first, with what each one does. */
