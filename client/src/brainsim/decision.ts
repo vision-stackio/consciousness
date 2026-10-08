@@ -6,9 +6,9 @@ import type { GenerativeModel } from "./predictive.js";
 export const ACTIONS: ActionLabel[] = ["OBSERVE", "APPROACH", "GREET", "INVESTIGATE", "FLEE", "FREEZE", "CONFRONT", "WITHDRAW", "REJECT", "RECOIL"];
 
 const SUPPORT: Record<ActionLabel, string[]> = {
-  OBSERVE: [], APPROACH: ["NACC", "VMPFC", "VTA"], GREET: ["FFA", "TPJ", "MPFC", "NACC"],
-  INVESTIGATE: ["ACC", "SC", "HIPP", "VTA"], FLEE: ["AMY", "PAG", "LC"], FREEZE: ["AMY", "PAG", "SC"],
-  CONFRONT: ["PUT", "ACC", "CAUD", "HYP"], WITHDRAW: ["SGACC", "PCC", "INS"], REJECT: ["INS", "OLF", "PUT"],
+  OBSERVE: [], APPROACH: ["NACC", "VMPFC", "VTA", "CB"], GREET: ["FFA", "TPJ", "MPFC", "NACC"],
+  INVESTIGATE: ["ACC", "SC", "HIPP", "VTA", "CB"], FLEE: ["AMY", "PAG", "LC"], FREEZE: ["AMY", "PAG", "SC"],
+  CONFRONT: ["PUT", "ACC", "CAUD", "HYP", "CB"], WITHDRAW: ["SGACC", "PCC", "INS"], REJECT: ["INS", "OLF", "PUT"],
   RECOIL: ["S1", "ACC", "INS", "PAG"],
 };
 
@@ -143,7 +143,9 @@ export class DecisionMaker {
     for (const a of ACTIONS) total += Math.max(0, this.x[a]);
     for (const a of ACTIONS) {
       const others = total - Math.max(0, this.x[a]);
-      const dx = -1.2 * this.x[a] + 2.2 * inp[a] - 0.9 * others + 0.35 * gauss(this.rnd) / Math.sqrt(Math.max(dt, 1e-3)) * 0.08;
+      // Human-like noise: higher under conflict and extreme arousal
+      const noiseScale = 0.08 + 0.12 * this.conflict + 0.06 * Math.abs(e("LC") - 0.3);
+      const dx = -1.2 * this.x[a] + 2.2 * inp[a] - 0.9 * others + 0.35 * gauss(this.rnd) / Math.sqrt(Math.max(dt, 1e-3)) * noiseScale;
       this.x[a] = clamp(this.x[a] + dx * dt, 0, 1.5);
     }
 
@@ -153,7 +155,9 @@ export class DecisionMaker {
     this.conflict = clamp(1 - gap / Math.max(this.x[lead], 0.05)) * clamp(this.x[lead] / 0.4);
     this.threshold = clamp(0.5 - 0.15 * e("LC") + 0.12 * this.conflict, 0.3, 0.7);
 
-    if (lead !== this.current && lead !== "OBSERVE" && this.x[lead] > this.threshold && gap > 0.06 && this.heldFor > 1.2) {
+    // Hesitation: under high conflict require longer evidence accumulation
+    const minHold = 1.2 + 1.4 * this.conflict;
+    if (lead !== this.current && lead !== "OBSERVE" && this.x[lead] > this.threshold && gap > 0.06 && this.heldFor > minHold) {
       const because = SUPPORT[lead].map((id) => [id, e(id)] as [string, number]).filter(([, v]) => v > 0.05)
         .sort((p, q) => q[1] - p[1]).slice(0, 3).map(([id, v]) => `${id} ${Math.round(v * 100)}%`).join(", ");
       this.current = lead;

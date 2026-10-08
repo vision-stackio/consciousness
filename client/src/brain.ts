@@ -162,20 +162,20 @@ export class Memory {
 }
 
 const MURMURS: Record<string, string[]> = {
-  happy: ["I feel good right now.", "Everything feels a bit brighter."],
-  afraid: ["My heart is racing. What was that?", "I don't like this. I'm keeping watch."],
-  angry: ["That wasn't nice.", "I'm still a little upset."],
-  sad: ["I feel a bit low.", "It's a grey kind of moment."],
-  disgusted: ["Ugh. Something's off."],
-  hurt: ["Ow. That still stings."],
-  sleepy: ["Mm. Heavy eyelids."],
-  excited: ["I feel like moving!", "Everything feels interesting right now."],
-  startled: ["Whoa, what was that?"],
-  lonely: ["It's quiet. I wonder where you are.", "Is anyone there?"],
-  bored: ["Nothing is happening. I'll find something to do.", "Time to shake things up."],
-  curious: ["I wonder what's over there.", "I haven't seen that corner yet."],
-  content: ["Nice and calm.", "This is a good spot."],
-  calm: ["Just thinking.", "All quiet."],
+  happy: ["I feel good right now.", "Everything feels a bit brighter.", "I could stay like this."],
+  afraid: ["My heart is racing. What was that?", "I don't like this. I'm keeping watch.", "Something feels off…"],
+  angry: ["That wasn't nice.", "I'm still a little upset.", "I need a moment."],
+  sad: ["I feel a bit low.", "It's a grey kind of moment.", "I wish someone were here."],
+  disgusted: ["Ugh. Something's off.", "I'd rather not."],
+  hurt: ["Ow. That still stings.", "I'm being careful now."],
+  sleepy: ["Mm. Heavy eyelids.", "A little rest would help."],
+  excited: ["I feel like moving!", "Everything feels interesting right now.", "What's next?"],
+  startled: ["Whoa, what was that?", "That got me."],
+  lonely: ["It's quiet. I wonder where you are.", "Is anyone there?", "Company would be nice."],
+  bored: ["Nothing is happening. I'll find something to do.", "Time to shake things up.", "I need a little spark."],
+  curious: ["I wonder what's over there.", "I haven't seen that corner yet.", "Something new would be good."],
+  content: ["Nice and calm.", "This is a good spot.", "I'm okay just being here."],
+  calm: ["Just thinking.", "All quiet.", "Soft moment."],
 };
 
 // ----------------------------------------------------------------- brain ---
@@ -247,6 +247,14 @@ export class Brain {
 
   /** Active goals (human-like hierarchical control). */
   private goals: Goal[] = [];
+  /** Fatigue (0..1) — builds with activity, recovers with rest. Homeostatic cycle. */
+  private fatigue = 0.1;
+  /** Simple self-model: how he usually feels / acts in situations */
+  private selfModel = { typicalMood: 0.1, playfulBias: 0.5, socialBattery: 0.7 };
+  /** Current intention — stick with a chosen action for a few cycles (coherence) */
+  private intention: { action: ActionName; until: number; confidence: number } | null = null;
+  /** Object preferences learned from play (id → value) */
+  private objectPref: Record<string, number> = {};
   /** Model of the human (theory of mind). */
   private userModel: UserModel = {
     friendliness: 0.2, attention: 0.3, predictability: 0.5, lastAct: "", trust: 0.4,
@@ -266,8 +274,25 @@ export class Brain {
   start() {
     if (this.timer) return;
     const m = this.memory.long;
-    const hello = m.userName ? `Welcome back, ${m.userName}.` : m.interactions > 0 ? "Good to see you again." : "Hello? I just woke up.";
-    this.thought = m.interactions > 0 ? "I remember being here before." : "First time awake. Looking around.";
+    const awayMs = m.lastSeenAt ? this.now() - m.lastSeenAt : 0;
+    const awayMin = awayMs / 60000;
+    let hello: string;
+    if (!m.interactions) {
+      hello = "Hello? I just woke up.";
+      this.thought = "First time awake. Looking around.";
+    } else if (m.userName && awayMin > 30) {
+      hello = `Welcome back, ${m.userName}. I missed this.`;
+      this.thought = "It's been a while. I still remember them.";
+    } else if (m.userName) {
+      hello = pick([`Hey ${m.userName}.`, `Hi ${m.userName}, I'm here.`, `Good to see you, ${m.userName}.`]);
+      this.thought = "I remember being here before.";
+    } else if (awayMin > 30) {
+      hello = "You're back. I was waiting.";
+      this.thought = "Someone returned after a long stretch alone.";
+    } else {
+      hello = "Good to see you again.";
+      this.thought = "I remember being here before.";
+    }
     this.event("system", this.thought);
     void this.say(hello);
     m.lastSeenAt = this.now();
@@ -488,6 +513,22 @@ export class Brain {
 
   /** A line he hasn't said recently. */
   private fresh(lines: string[]): string { return pickFresh(lines, this.spoken, Math.random); }
+  /** Soften speech under conflict / low mood — human-like hesitation */
+  private softSay(line: string | undefined): string | undefined {
+    if (!line) return undefined;
+    const lim = this.chem();
+    const conflict = lim ? (1 - (lim.instinctConfidence ?? 0.6)) : 0;
+    const low = (lim?.moodValence ?? 0) < -0.25 || lim?.emotion === "SAD" || lim?.emotion === "FEARFUL";
+    if (conflict > 0.45 && Math.random() < 0.55) {
+      const hedge = pick(["Um… ", "Hmm. ", "Well… ", "I think… "]);
+      return hedge + line.charAt(0).toLowerCase() + line.slice(1);
+    }
+    if (low && Math.random() < 0.4) {
+      const soft = pick(["… ", "Quietly: ", ""]);
+      return soft + line;
+    }
+    return line;
+  }
 
   /** Something from his own past, said out loud. Gives him an inner life. */
   private recallLine(): string | null {
@@ -517,7 +558,12 @@ export class Brain {
     // brainstem: arena safety (disabled when ARENA_INFINITE)
     if (!ARENA_INFINITE && this.distHome() > ARENA * 0.9) { void this.runLocal("go_home"); return; }
 
-    const gap = (this.personPresent() ? Math.min(this.nextGap, 2500) : this.nextGap) / this.scale; // more responsive with company
+    // Human-like hesitation: fatigue and neural conflict slow the decision tempo
+    const lim = this.chem();
+    const conflict = lim?.instinctConfidence != null ? (1 - (lim.instinctConfidence ?? 0.5)) : 0;
+    const hesitate = 1 + 0.8 * this.fatigue + 0.7 * conflict;
+    const baseGap = (this.personPresent() ? Math.min(this.nextGap, 2500) : this.nextGap) * hesitate;
+    const gap = baseGap / this.scale;
     if (!(this.urgent || (!this.userRecent(8000) && this.now() - this.lastDecisionAt > gap))) return;
     this.urgent = false;
 
@@ -540,6 +586,8 @@ export class Brain {
     this.curiosity = clamp(this.curiosity + (0.008 + 0.02 * surpriseBoost) * dt);
     this.social = clamp(this.social + 0.005 * dt * (this.userRecent(30000) ? 0.2 : 1));
     this.boredom = clamp(this.boredom + 0.006 * dt);
+    // passive fatigue recovery when idle
+    this.fatigue = Math.max(0, this.fatigue - 0.004 * dt);
     for (const k of Object.keys(this.habit)) this.habit[k] = Math.min(1, this.habit[k] + 0.01 * dt);
     const ch = this.chem()?.nm;
     // hormones move his emotional baseline: serotonin/oxytocin/dopamine/endorphin lift it, cortisol sinks it
@@ -716,24 +764,38 @@ export class Brain {
   private updateGoals(_dt: number) {
     const t = this.now();
     this.goals = this.goals.filter((g) => g.until > t);
-    // Form new goals from strong drives / brain state
-    if (this.curiosity > 0.75 && !this.goals.some((g) => g.kind === "explore")) {
-      this.adoptGoal("explore", 0.55 + 0.3 * this.curiosity, 25000);
-    }
-    if (this.social > 0.7 && !this.personPresent() && !this.goals.some((g) => g.kind === "social")) {
-      this.adoptGoal("social", 0.5 + 0.35 * this.social, 20000);
-    }
-    if (this.boredom > 0.72 && this.freeToy() && !this.goals.some((g) => g.kind === "play")) {
-      this.adoptGoal("play", 0.5 + 0.3 * this.boredom, 18000);
-    }
     const lim = this.chem();
-    if (lim && (lim.nm.cortisol > 0.45 || lim.emotion === "FEARFUL" || lim.emotion === "SAD")) {
+    const moodV = lim ? ((lim.moodValence != null) ? lim.moodValence : (lim.emotion === "HAPPY" || lim.emotion === "EXCITED" ? 0.4 : lim.emotion === "SAD" || lim.emotion === "FEARFUL" ? -0.4 : 0)) : 0;
+
+    // Curiosity → explore
+    if (this.curiosity > 0.7 && !this.goals.some((g) => g.kind === "explore")) {
+      this.adoptGoal("explore", 0.5 + 0.35 * this.curiosity, 28000);
+    }
+    // Lonely → social (stronger if mood is low)
+    if (this.social > 0.65 && !this.personPresent() && !this.goals.some((g) => g.kind === "social")) {
+      this.adoptGoal("social", 0.5 + 0.35 * this.social + (moodV < -0.15 ? 0.15 : 0), 22000);
+    }
+    // Bored + toys → play
+    if (this.boredom > 0.65 && this.freeToy() && !this.goals.some((g) => g.kind === "play")) {
+      this.adoptGoal("play", 0.48 + 0.35 * this.boredom, 20000);
+    }
+    // Company + good mood → mild social goal (stay engaged)
+    if (this.personPresent() && moodV > 0.15 && this.userModel.friendliness > 0.1 && !this.goals.some((g) => g.kind === "social")) {
+      this.adoptGoal("social", 0.4, 12000);
+    }
+    // Stress / fear / sadness → rest or avoid
+    if (lim && (lim.nm.cortisol > 0.42 || lim.emotion === "FEARFUL" || lim.emotion === "SAD" || moodV < -0.35)) {
       if (!this.goals.some((g) => g.kind === "rest" || g.kind === "avoid")) {
-        this.adoptGoal(lim.emotion === "FEARFUL" ? "avoid" : "rest", 0.6, 15000);
+        this.adoptGoal(lim.emotion === "FEARFUL" ? "avoid" : "rest", 0.55 + 0.2 * lim.nm.cortisol, 16000);
       }
     }
-    if (lim?.instinct === "INVESTIGATE" && (lim.instinctConfidence ?? 0) > 0.55) {
-      this.adoptGoal("investigate", 0.5 + 0.3 * (lim.instinctConfidence ?? 0.5), 12000);
+    // Neural investigate instinct
+    if (lim?.instinct === "INVESTIGATE" && (lim.instinctConfidence ?? 0) > 0.5) {
+      this.adoptGoal("investigate", 0.48 + 0.35 * (lim.instinctConfidence ?? 0.5), 14000);
+    }
+    // Fatigue → rest goal
+    if (this.fatigue > 0.55 && !this.goals.some((g) => g.kind === "rest")) {
+      this.adoptGoal("rest", 0.45 + 0.4 * this.fatigue, 15000);
     }
   }
 
@@ -751,6 +813,7 @@ export class Brain {
         um.mood = clamp(um.mood + 0.15, -1, 1);
         um.inferredGoal = "chat";
         um.patience = clamp(um.patience + 0.05);
+        this.adoptGoal("social", 0.55, 10000);
         break;
       case "scold":
         um.friendliness = clamp(um.friendliness - 0.18, -1, 1);
@@ -759,6 +822,9 @@ export class Brain {
         um.mood = clamp(um.mood - 0.2, -1, 1);
         um.inferredGoal = "alone";
         um.patience = clamp(um.patience - 0.08);
+        // Human-like: withdraw briefly after being scolded
+        this.adoptGoal("rest", 0.7, 12000);
+        this.intention = null; // drop current plan
         break;
       case "talk":
         um.attention = clamp(um.attention + 0.2);
@@ -850,16 +916,39 @@ export class Brain {
       if (a === "rest") u += 0.8 * mel + 0.7 * cor;
     }
 
-    // Active goals bias the policy (hierarchical control)
+    // Active goals bias the policy (hierarchical control) — stronger shielding
     for (const g of this.goals) {
-      const w = 0.45 * g.priority;
+      const w = 0.7 * g.priority;   // was 0.45 — goals now dominate more
       if (g.kind === "explore" && (a === "wander" || a === "look_around")) u += w;
       if (g.kind === "social" && (a === "call_out" || a === "watch" || a === "murmur")) u += w;
       if (g.kind === "play" && (a === "play" || a === "dance")) u += w;
       if (g.kind === "rest" && a === "rest") u += w;
       if (g.kind === "avoid" && (a === "rest" || a === "look_around")) u += w;
       if (g.kind === "investigate" && (a === "look_around" || a === "wander" || a === "play")) u += w;
+      // Goal shielding: suppress competing action families when a strong goal is active
+      if (g.priority > 0.6) {
+        if (g.kind === "rest" && (a === "dance" || a === "play" || a === "wander")) u -= 0.45 * g.priority;
+        if (g.kind === "play" && a === "rest") u -= 0.3 * g.priority;
+        if (g.kind === "social" && a === "wander") u -= 0.25 * g.priority;
+      }
     }
+
+    // Emotional inertia (mood) bias — slow mood from the neural layer
+    const limMood = lim?.emotion;
+    if (limMood === "SAD" || limMood === "FEARFUL") {
+      if (a === "rest" || a === "look_around") u += 0.25;
+      if (a === "dance" || a === "play" || a === "call_out") u -= 0.3;
+    } else if (limMood === "HAPPY" || limMood === "EXCITED") {
+      if (a === "dance" || a === "play" || a === "call_out") u += 0.2;
+    }
+
+    // Fatigue / homeostatic cycle
+    if (a === "rest") u += 0.9 * this.fatigue;
+    if (a === "dance" || a === "play" || a === "wander") u -= 0.55 * this.fatigue;
+
+    // Self-model bias (consistency of personality)
+    u += 0.12 * (this.selfModel.playfulBias - 0.5) * (a === "dance" || a === "play" ? 1 : a === "rest" ? -0.5 : 0);
+    if (a === "watch" || a === "call_out") u += 0.15 * (this.selfModel.socialBattery - 0.5);
 
     // Theory-of-mind: inferred goals, mood, trust, patience modulate social policy
     const um = this.userModel;
@@ -894,23 +983,74 @@ export class Brain {
       }
     }
 
-    // experience: what has worked before, overall (15%) and in this exact situation (25%)
-    u += 0.15 * (this.memory.long.actionValue[a] ?? 0) + 0.25 * (this.memory.long.ctxValue[this.ctxKey(a)] ?? 0);
-    if (this.recent[0] === a) u -= 0.45; else if (this.recent.includes(a)) u -= 0.15;
+    // experience: what has worked before, overall and in this exact situation
+    u += 0.18 * (this.memory.long.actionValue[a] ?? 0) + 0.28 * (this.memory.long.ctxValue[this.ctxKey(a)] ?? 0);
+
+    // Episodic memory bias — recent good experiences with similar actions nudge him back
+    const eps = this.memory.episodes;
+    if (eps.length) {
+      let epBoost = 0;
+      for (let i = eps.length - 1; i >= Math.max(0, eps.length - 12); i--) {
+        const e = eps[i];
+        if (e.salience < 0.3) continue;
+        if ((a === "play" || a === "dance") && (e.kind === "played" || e.detail.includes("danc"))) epBoost += 0.08 * e.valence * e.salience;
+        if (a === "watch" && e.kind === "saw" && e.detail.includes("person")) epBoost += 0.06 * Math.max(0, e.valence) * e.salience;
+        if (a === "wander" && e.kind === "discovered") epBoost += 0.05 * e.salience;
+        if (a === "rest" && e.valence < -0.2) epBoost += 0.04 * e.salience;
+      }
+      u += clamp(epBoost, -0.35, 0.45);
+    }
+
+    // Favorite action slight preference (personality consistency)
+    if (this.memory.long.favorite === a) u += 0.12;
+
+    // Stronger anti-repetition so he doesn't loop the same action
+    if (this.recent[0] === a) u -= 0.55;
+    else if (this.recent[1] === a) u -= 0.28;
+    else if (this.recent.includes(a)) u -= 0.12;
+
+    // When someone is present, suppress aimless wandering (smarter social presence)
+    if (this.personPresent() && a === "wander") u -= 0.4;
+    if (this.personPresent() && a === "call_out") u -= 0.5; // already have company
+
+    // Curiosity toward interesting arena objects when bored
+    if ((a === "play" || a === "wander" || a === "look_around") && this.boredom > 0.4) {
+      const toys = this.body.getWorld().filter((o) => o.kind === "toy");
+      if (toys.length) {
+        const best = Math.max(...toys.map((t) => this.objectPref[t.id] ?? 0));
+        u += 0.15 * best + 0.08 * toys.length * 0.1;
+      }
+    }
     return u;
   }
 
   private choose(): ActionName {
+    const now = this.now();
+    // Stick with current intention when still confident (behavioural coherence)
+    if (this.intention && this.intention.until > now) {
+      const still = this.score(this.intention.action);
+      if (Number.isFinite(still) && still > -0.5) {
+        this.trace = `commit ${this.intention.action} (${still.toFixed(2)})`;
+        return this.intention.action;
+      }
+      this.intention = null;
+    }
     const scored = ACTIONS.map((a) => ({ a, u: this.score(a) })).filter((x) => Number.isFinite(x.u));
     if (!scored.length) return "look_around";
     this.trace = [...scored].sort((x, y) => y.u - x.u).slice(0, 3).map((x) => `${x.a} ${x.u.toFixed(2)}`).join(" · ");
     const max = Math.max(...scored.map((x) => x.u));
-    // Adaptive temperature: higher → more exploration (human-like uncertainty-driven behaviour)
-    const temp = Math.max(0.08, Math.min(0.35, this.exploreTemp));
+    // Lower temperature when a clear winner exists → smarter, less random
+    const ranked = [...scored].sort((x, y) => y.u - x.u);
+    const gap = ranked.length > 1 ? ranked[0].u - ranked[1].u : 1;
+    const temp = Math.max(0.06, Math.min(0.32, this.exploreTemp * (gap < 0.25 ? 1.15 : 0.85)));
     const w = scored.map((x) => Math.exp((x.u - max) / temp));
     let r = Math.random() * w.reduce((s, x) => s + x, 0);
-    for (let i = 0; i < scored.length; i++) { r -= w[i]; if (r <= 0) return scored[i].a; }
-    return scored[0].a;
+    let pick = scored[0].a;
+    for (let i = 0; i < scored.length; i++) { r -= w[i]; if (r <= 0) { pick = scored[i].a; break; } }
+    // Commit to the choice for 4–12 s so behaviour doesn't twitch
+    const commitMs = 4000 + Math.min(8000, Math.max(0, ranked[0].u) * 6000);
+    this.intention = { action: pick, until: now + commitMs, confidence: clamp(ranked[0].u / 2) };
+    return pick;
   }
 
   /**
@@ -940,8 +1080,8 @@ export class Brain {
     switch (a) {
       case "wander": return { ...this.planWander(rand(2500, 6000)), reason: `Restless (curiosity ${pct(this.curiosity)}), so I'm going to explore.` };
       case "look_around": return { instr: [exec("EYE_SET", rand(30, 80)), sleep(800), exec("EYE_SET", rand(100, 150)), sleep(900), exec("EYE_CENTER")], reason: "Quietly checking my surroundings.", effect: a };
-      case "dance": return { instr: [exec("DANCE"), sleep(rand(4000, 7000)), stopAll()], say: this.fresh(["I feel like dancing!", "Music in my head!", "I can't stand still!"]), reason: `Feeling ${this.mood()} and ${pct(this.boredom)} bored, so I'm dancing.`, effect: a };
-      case "rest": return { instr: [stopAll(), exec("EYE_SET", 60), sleep(7000), exec("EYE_CENTER")], say: this.fresh(["Taking a quiet moment.", "Just resting for a bit.", "Ahh. Quiet."]), reason: `Feeling ${this.mood()}, so I'm taking a quiet moment.`, effect: a };
+      case "dance": return { instr: [exec("DANCE"), sleep(rand(4000, 7000)), stopAll()], say: this.fresh(["I feel like dancing!", "Music in my head!", "I can't stand still!", "This mood needs movement."]), reason: `Feeling ${this.mood()} — dancing feels right.`, effect: a };
+      case "rest": return { instr: [stopAll(), exec("EYE_SET", 60), sleep(7000), exec("EYE_CENTER")], say: this.fresh(["Taking a quiet moment.", "Just resting for a bit.", "Ahh. Quiet.", "I need a pause."]), reason: `Feeling ${this.mood()} — resting.`, effect: a };
       case "call_out": return {
         instr: [exec("EYE_LEFT", 25), sleep(600), exec("EYE_RIGHT", 50), sleep(600), exec("EYE_CENTER")],
         say: name ? this.fresh([`${name}? Are you there?`, `Hey ${name}, I'm over here.`]) : this.fresh(["Hello? Is anyone there?", "I could use some company.", "It's so quiet in here."]),
@@ -958,9 +1098,15 @@ export class Brain {
           reason: `${lab === "person" || lab === "someone" ? "Someone is here" : "I can see a " + lab}, so I'm keeping my eyes on them.`, label: "watch", effect: a };
       }
       case "play": {
-        const toy = this.freeToy();
+        const toy = this.preferredToy() ?? this.freeToy();
         if (!toy) return this.plan("look_around");
-        return { instr: [exec("GOTO", `${toy.x},${toy.z},${2.2 * u}`), exec("DANCE"), sleep(1500), stopAll()], say: Math.random() < 0.5 ? this.fresh(["Got it!", "Found you!", "Here I am!"]) : undefined, reason: `Bored and curious, so I'm going to play with ${toy.id}.`, effect: a };
+        const nice = toy.id.replace(/^toy_/, "").replace(/_/g, " ");
+        return {
+          instr: [exec("GOTO", `${toy.x},${toy.z},${2.2 * u}`), exec("DANCE"), sleep(1800), stopAll()],
+          say: Math.random() < 0.55 ? this.fresh([`The ${nice} one!`, `Found the ${nice} toy.`, "This looks fun.", "Coming for you!"]) : undefined,
+          reason: `I'm going to play with the ${nice} toy.`,
+          effect: a,
+        };
       }
     }
   }
@@ -972,12 +1118,25 @@ export class Brain {
       this.lastAction = plan.label ?? plan.effect ?? "idle";
       if (plan.effect) this.recent = [plan.effect, ...this.recent].slice(0, 3);
       this.event("action", plan.label ?? plan.reason);
-      if (plan.say) { this.event("speech", plan.say); this.lastSpokeAt = this.now(); }
+      if (plan.say) {
+        plan.say = this.softSay(plan.say) ?? plan.say;
+        this.event("speech", plan.say);
+        this.lastSpokeAt = this.now();
+      }
       const b = this.needs(), v0 = this.valence, ctx0 = this.ctxKey("");
       if (plan.effect === "rest") this.feel("sleep");
       await this.body.act(plan.instr, plan.say);
       if (plan.effect === "rest") this.feel("wake");
       if (plan.effect === "dance") this.feel("danced");
+      // Homeostatic fatigue: activity raises it, rest lowers it
+      if (plan.effect === "rest") this.fatigue = Math.max(0, this.fatigue - 0.22);
+      else if (plan.effect === "dance" || plan.effect === "play") this.fatigue = Math.min(1, this.fatigue + 0.12);
+      else if (plan.effect === "wander") this.fatigue = Math.min(1, this.fatigue + 0.06);
+      else this.fatigue = Math.max(0, this.fatigue - 0.01);
+      // Slow self-model update from experience
+      if (plan.effect === "dance" || plan.effect === "play") this.selfModel.playfulBias = clamp(this.selfModel.playfulBias + 0.02, 0.2, 0.85);
+      if (plan.effect === "watch" || plan.effect === "call_out") this.selfModel.socialBattery = clamp(this.selfModel.socialBattery - 0.03, 0.15, 0.95);
+      if (plan.effect === "rest") this.selfModel.socialBattery = clamp(this.selfModel.socialBattery + 0.05, 0.15, 0.95);
       let novel = false;
       if (plan.effect) {
         novel = this.applyEffects(plan.effect);
@@ -988,6 +1147,14 @@ export class Brain {
         const ck = ctx0 + plan.effect, oc = this.memory.long.ctxValue[ck] ?? 0;
         this.memory.long.ctxValue[ck] = clamp(oc + 0.3 * (reward - oc), -1, 1);
         this.memory.remember(plan.effect, plan.reason, reward, clamp(0.25 + Math.abs(reward) + (novel ? 0.4 : 0)));
+        // Learn which toys he likes
+        if (plan.effect === "play") {
+          const toy = this.preferredToy() ?? this.freeToy();
+          if (toy) {
+            const prev = this.objectPref[toy.id] ?? 0;
+            this.objectPref[toy.id] = clamp(prev + 0.15 * reward + 0.05, -0.5, 1);
+          }
+        }
         // Teach the neural layer with the same behavioural outcome so both
         // levels of intelligence stay aligned.
         this.opts.onOutcome?.(reward);
@@ -1072,6 +1239,16 @@ export class Brain {
   private freeToy() {
     const toys = this.body.getWorld().filter((o) => o.kind === "toy" && (this.toyCooldown.get(o.id) ?? 0) <= this.now());
     return toys.sort((a, b) => this.distTo(a.x, a.z) - this.distTo(b.x, b.z))[0];
+  }
+  /** Prefer toys he has liked before, then nearest. */
+  private preferredToy() {
+    const toys = this.body.getWorld().filter((o) => o.kind === "toy" && (this.toyCooldown.get(o.id) ?? 0) <= this.now());
+    if (!toys.length) return undefined;
+    return toys.sort((a, b) => {
+      const pa = this.objectPref[a.id] ?? 0, pb = this.objectPref[b.id] ?? 0;
+      if (Math.abs(pb - pa) > 0.05) return pb - pa;
+      return this.distTo(a.x, a.z) - this.distTo(b.x, b.z);
+    })[0];
   }
   private resolveTarget(t: string): { x: number; z: number; stop: number } | null {
     const u = this.body.getPose().unit;

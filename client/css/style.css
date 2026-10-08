@@ -158,3 +158,13 @@ h3{font:600 10.5px var(--mono);letter-spacing:.09em;text-transform:uppercase;col
 .brain.big .arch-flow{font-size:11px;gap:4px 3px}
 .brain.big .arch-node{padding:3px 7px}
 .brain.big .arch-metrics{font-size:11px;gap:10px 18px}
+
+/* CNS division neuron mass readout */
+.brain-divisions {
+  font-size: 0.72rem;
+  opacity: 0.75;
+  margin-top: 0.25rem;
+  letter-spacing: 0.02em;
+  color: var(--muted, #9aa);
+}
+.brain-divisions span { margin-right: 0.15rem; }

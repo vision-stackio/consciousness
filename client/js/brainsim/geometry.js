@@ -103,7 +103,7 @@ export function buildCloud(nodes, density = 1, seed = 1337) {
         if (r.kind === "shell")
             continue;
         const sign = n.hemi === "R" ? -1 : 1;
-        const count = Math.max(10, Math.round(r.neurons * 3 * density));
+        const count = Math.max(10, Math.min(2500, Math.round(Math.sqrt(r.neurons) * 12 * density))); // sqrt so cerebellum is dense but renderable
         const [rx, ry, rz] = r.radii ?? [4, 4, 4];
         for (let i = 0; i < count; i++) {
             let p;

@@ -22,6 +22,9 @@ export interface LimbicState {
   emotion: EmotionLabel; intensity: number; because: string;
   nm: Neuromodulators; asleep: boolean;
   instinct: string; instinctConfidence: number;
+  /** Slow mood valence (-1..1) — emotional inertia */
+  moodValence: number;
+  moodArousal: number;
 }
 
 const ap = (p: Partial<Appraisal>): Appraisal => finishAppraisal({ ...ZERO_APPRAISAL, ...p });
@@ -140,6 +143,8 @@ export class Limbic {
     return {
       emotion: s.emotion.current, intensity: s.emotion.intensity, because: s.emotion.because,
       nm: s.nm, asleep: s.asleep, instinct: s.decision.current, instinctConfidence: s.decision.confidence,
+      moodValence: s.emotion.moodValence ?? 0,
+      moodArousal: s.emotion.moodArousal ?? 0.3,
     };
   }
 

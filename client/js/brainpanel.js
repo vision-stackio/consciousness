@@ -1,5 +1,5 @@
 import { CHEMS } from "./brainsim/chem.js";
-import { GROUP_COLOR, GROUP_LABEL } from "./brainsim/regions.js";
+import { GROUP_COLOR, GROUP_LABEL, DIVISION_LABEL, divisionNeuronTotals } from "./brainsim/regions.js";
 export const EMOTION_COLOR = {
     NEUTRAL: "#b0b0b0", CALM: "#7bdff2", HAPPY: "#ffd166", EXCITED: "#ff9f1c", CURIOUS: "#4cc9f0", SURPRISED: "#f15bb5",
     FEARFUL: "#b388ff", ANGRY: "#ff3b3b", DISGUSTED: "#9ccc3c", SAD: "#5c7cfa", PAIN: "#ff6b35",
@@ -83,7 +83,20 @@ export class BrainPanel {
             r.row.classList.toggle("hot", v - c.base > 0.12); // released: the ring lights up in its colour
         }
         const d = sim.decision;
-        $("brInstinct").innerHTML = `instinct <b>${d.current.toLowerCase()}</b>${d.current === "OBSERVE" ? "" : ` · ${pct(d.confidence)}%`}${d.conflict > 0.5 ? " · hesitating" : ""}`;
+        const moodV = sim.emotion.moodValence ?? 0;
+        const moodA = sim.emotion.moodArousal ?? 0.3;
+        const moodTag = moodV > 0.2 ? "upbeat" : moodV < -0.2 ? "low" : "neutral";
+        $("brInstinct").innerHTML = `instinct <b>${d.current.toLowerCase()}</b>${d.current === "OBSERVE" ? "" : ` · ${pct(d.confidence)}%`}${d.conflict > 0.5 ? " · hesitating" : ""} · mood ${moodTag}`;
+        // CNS division neuron totals (relative weights matching real ratios)
+        const divEl = document.getElementById("brDivisions");
+        if (divEl) {
+            const tot = divisionNeuronTotals();
+            const sum = tot.cerebrum + tot.cerebellum + tot.brainstem || 1;
+            divEl.innerHTML = ["cerebrum", "cerebellum", "brainstem"].map((k) => {
+                const pctN = Math.round(100 * tot[k] / sum);
+                return `<span title="${DIVISION_LABEL[k]}">${k} ${pctN}%</span>`;
+            }).join(" · ");
+        }
         // Live predictive-processing architecture panel
         const gen = sim.generative;
         const pe = gen.lastPE;

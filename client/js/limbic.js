@@ -127,6 +127,8 @@ export class Limbic {
         return {
             emotion: s.emotion.current, intensity: s.emotion.intensity, because: s.emotion.because,
             nm: s.nm, asleep: s.asleep, instinct: s.decision.current, instinctConfidence: s.decision.confidence,
+            moodValence: s.emotion.moodValence ?? 0,
+            moodArousal: s.emotion.moodArousal ?? 0.3,
         };
     }
     /** Wipe neural learning (called when user hits full reset). */

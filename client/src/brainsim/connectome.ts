@@ -40,7 +40,9 @@ export const EDGES: Edge[] = [
   ["SGACC", "VTA", -0.3],
   // action selection
   ["DLPFC", "CAUD", 0.55], ["CAUD", "THAL", 0.4], ["PUT", "THAL", 0.4], ["THAL", "PMC", 0.55], ["PMC", "M1", 0.8],
-  ["M1", "PUT", 0.25], ["M1", "CB", 0.4], ["CB", "THAL", 0.3], ["PPC", "PMC", 0.45], ["DLPFC", "PMC", 0.45],
+  ["M1", "PUT", 0.25], ["M1", "CB", 0.75], ["CB", "THAL", 0.65], ["CB", "PMC", 0.45], ["CB", "M1", 0.35],
+  ["PMC", "CB", 0.4], ["PPC", "CB", 0.3], ["PUT", "CB", 0.25],
+  ["PPC", "PMC", 0.45], ["DLPFC", "PMC", 0.45],
   ["ACC", "DLPFC", 0.45], ["DLPFC", "ACC", 0.2], ["ACC", "PMC", 0.2], ["PUT", "M1", 0.15],
   // memory + default mode
   ["HIPP", "PHC", 0.5], ["PHC", "HIPP", 0.5], ["HIPP", "PCC", 0.35], ["PCC", "HIPP", 0.3], ["HIPP", "VMPFC", 0.3],

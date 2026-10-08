@@ -77,15 +77,23 @@ export class BrainSim {
             list.push(i);
             this.byRegion.set(node.region.id, list);
         }
+        // Neuron-density scaling: denser regions (esp. cerebellum ~80% of neurons)
+        // exert proportionally stronger influence on their targets.
+        // Scale is gentle (sqrt) so the network stays stable.
+        const refNeurons = 80; // typical cortical blob scale
         for (const [from, to, w] of EDGES) {
             const src = this.byRegion.get(from), dst = this.byRegion.get(to);
             if (!src || !dst)
                 throw new Error(`bad edge ${from}->${to}`);
+            const srcNeurons = this.nodes[src[0]].region.neurons || refNeurons;
+            const densityGain = Math.sqrt(Math.max(0.25, srcNeurons / refNeurons));
+            // Cap so cerebellum is strong but does not dominate every pathway
+            const gain = Math.min(densityGain, 4.5);
             for (const s of src)
                 for (const d of dst) {
                     const hs = this.nodes[s].hemi, hd = this.nodes[d].hemi;
                     const same = hs === hd || hs === "M" || hd === "M";
-                    const ww = same ? w : w * CONTRALATERAL;
+                    const ww = (same ? w : w * CONTRALATERAL) * gain;
                     this.edges.push({ from: s, to: d, base: ww, w: ww });
                 }
         }
@@ -112,7 +120,7 @@ export class BrainSim {
             s += this.activity[i];
         return s / list.length;
     }
-    get reader() { return { ex: (id) => this.ex(id), nm: this.nm, startle: this.startle }; }
+    get reader() { return { ex: (id) => this.ex(id), nm: this.nm, startle: this.startle, moodValence: this.emotion.moodValence, moodArousal: this.emotion.moodArousal }; }
     stimulate(stim) {
         if (this.asleep && wakesBrain(stim))
             this.wake();
@@ -252,6 +260,10 @@ export class BrainSim {
                 case "PMC":
                 case "PPC":
                     x += 0.15 * (nm.adrenaline - 0.05);
+                    break;
+                case "CB":
+                    // Cerebellum: dense motor timing / error-correction. High activity stabilises motor output.
+                    x += 0.2 * (nm.acetylcholine - 0.15) + 0.1 * (nm.dopamine - 0.1);
                     break;
                 case "S1":
                     x += 0.2 * (nm.acetylcholine - 0.15) - 0.25 * (nm.endorphin - 0.1);
